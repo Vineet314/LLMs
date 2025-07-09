@@ -2,7 +2,6 @@
 This code implements the latest advancement in the transformer acrhitecture: The Multi Head Latent Attention. 
 Introduced by DeepSeek in : https://arxiv.org/abs/2405.04434
 
-
 Work in progress, not implemented yet.
 '''
 

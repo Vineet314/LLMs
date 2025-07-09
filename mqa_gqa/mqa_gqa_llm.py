@@ -56,6 +56,8 @@ class CausalSelfAttention(nn.Module):
 
         # Before attention, repeat K and V heads to match Q heads
         # basically copying K,V to perform MQA and GQA
+        # i could set enable_gqa=True in F.scaled_dot_product_attention but i am using repeat_interleave instead, as per:
+        # https://docs.pytorch.org/docs/main/generated/torch.nn.functional.scaled_dot_product_attention.html
         if self.n_kv_heads != self.n_head:
             num_repeats = self.n_head // self.n_kv_heads
             k = k.repeat_interleave(num_repeats, dim=1)
