@@ -2,7 +2,7 @@
 This code implements the latest advancement in the transformer acrhitecture: The Multi Head Latent Attention. 
 Introduced by DeepSeek in : https://arxiv.org/abs/2405.04434
 
-Work in progress, not implemented yet.
+This code builds a transformer based LLM which uses the 'Low-Rank Key-Value Joint Compression' MHLA algorithm as per the above paper.
 '''
 
 import torch
@@ -36,8 +36,9 @@ class config:
     dropout : float
     total_batch_size : int
 
-class CausalSelfAttention(nn.Module):
-    """ A fully parallel implementation of the MHLA algorithm. No for loops. """
+class NaiveMHLA(nn.Module):
+    """ A fully parallel implementation of the MHLA algorithm. No for loops. 
+    Currently does not support RoPE encodings. Thus Naive MHLA."""
     def __init__(self, config:config):
         super().__init__()
         self.config = config
@@ -114,7 +115,7 @@ class Block(nn.Module):
     def __init__(self, config):
         # n_embd: embedding dimension, n_head: the number of heads we'd like
         super().__init__()
-        self.attn = CausalSelfAttention(config)
+        self.attn = NaiveMHLA(config)
         self.mlp  = MLP(config)
         self.ln1  = nn.LayerNorm(config.n_embd)
         self.ln2  = nn.LayerNorm(config.n_embd)
