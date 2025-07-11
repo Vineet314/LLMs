@@ -50,7 +50,7 @@ class config:
 
 MLAconfig = config(
     # hyperparameters
-    batch_size = 4, # how many independent sequences will we process in parallel?
+    batch_size = 8, # how many independent sequences will we process in parallel?
     block_size = 1024, # what is the maximum context length for predictions?
     vocab_size = 50304, # OPTIM 4 (along with grad clipping) brought dt from 95 to 90
 
@@ -65,12 +65,12 @@ MLAconfig = config(
     compile = False if os.name != 'posix' else True,
     save_model = True,
 
-    n_embd = 768,
+    n_embd = 512,
     n_head = 8,
     latent_dim = 32,
     n_layer = 6,
     dropout = 0.2,
-    total_batch_size = 2**16)
+    total_batch_size = 2**13)
 
 class DataLoader:
     def __init__(self, B, T):

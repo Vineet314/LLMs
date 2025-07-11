@@ -52,21 +52,23 @@ class NaiveMHLA(nn.Module):
         self.W_o   = nn.Linear(config.n_embd,     config.n_embd,     bias=False)  # Final output projection
         # self.ln  = nn.LayerNorm(config.latent_dim)
         self.dropout = nn.Dropout(config.dropout)
-        self.register_buffer('k_abs', None)
-        self.register_buffer('v_abs', None)
+        self.k_abs = None
+        self.v_abs = None
+        # self.register_buffer('k_abs', None)
+        # self.register_buffer('v_abs', None)
         self.register_buffer('tril', torch.tril(torch.ones(config.block_size, config.block_size)).unsqueeze(0).unsqueeze(0))
 
     def forward(self, x:torch.Tensor, kv_cache=None) -> torch.Tensor:
 
         B, T, C = x.size()
         nh , nl, hs = self.config.n_head, self.config.latent_dim, self.config.n_embd//self.config.n_head
-        if self.k_abs is None:
-            k_absorbed = self.W_dq.weight.T @ self.W_uk.weight.T @ self.W_uk.weight # (C,nl) x (nl,C) x (C,nl) = (C,nl)
-            self.k_abs = k_absorbed.view(nh, hs, nl).unsqueeze(0) # (1, nh, hs, nl)
+        # if self.k_abs is None:
+        k_absorbed = self.W_dq.weight.T @ self.W_uk.weight.T @ self.W_uk.weight # (C,nl) x (nl,C) x (C,nl) = (C,nl)
+        self.k_abs = k_absorbed.view(nh, hs, nl).unsqueeze(0) # (1, nh, hs, nl)
 
-        if self.v_abs is None:
-            v_absorbed = self.W_uv.weight.T @ self.W_o.weight.T   # (nl, C) x (C, C) = (nl, C)
-            self.v_abs = v_absorbed.view(nl, nh, hs).transpose(0,1).unsqueeze(0) # (1, nh, nl, hs)
+        # if self.v_abs is None:
+        v_absorbed = self.W_uv.weight.T @ self.W_o.weight.T   # (nl, C) x (C, C) = (nl, C)
+        self.v_abs = v_absorbed.view(nl, nh, hs).transpose(0,1).unsqueeze(0) # (1, nh, nl, hs)
         
         new_c_kv = self.W_dkv(x)  # down projection : (B,T,C) -> (B,T,nl)
         if kv_cache is None:
