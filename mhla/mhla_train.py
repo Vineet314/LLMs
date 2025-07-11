@@ -26,27 +26,51 @@ torch.set_float32_matmul_precision("high") # OPTIM 1 brought dt from 230 to 170
 @dataclass
 class config:
     # hyperparameters
-    batch_size = 4 # how many independent sequences will we process in parallel?
-    block_size = 1024 # what is the maximum context length for predictions?
-    vocab_size = 50304 # OPTIM 4 (along with grad clipping) brought dt from 95 to 90
+    batch_size : int # how many independent sequences will we process in parallel?
+    block_size : int  # what is the maximum context length for predictions?
+    vocab_size : int # OPTIM 4 (along with grad clipping) brought dt from 95 to 90
 
-    max_iters = 500
-    eval_interval = 50
-    learning_rate = 3e-4
-    warmup_steps = 25
-    max_decay_steps = 75
+    max_iters : int
+    eval_interval : int
+    learning_rate : float
+    warmup_steps : int
+    max_decay_steps : int
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    eval_iters = 200
-    compile = False if os.name != 'posix' else True
-    save_model = True
+    device : str
+    eval_iters : int
+    compile : bool #= False if os.name != 'posix' else True
+    save_model : bool
 
-    n_embd = 384
-    n_head = 6
-    n_layer = 6
-    n_kv_heads = 2 # Set to 6 for MHA, 1 for MQA, or another divisor of n_head for GQA
-    dropout = 0.2
-    total_batch_size = 2**16
+    latent_dim : int
+    n_embd : int
+    n_head : int
+    n_layer : int
+    dropout : float
+    total_batch_size : int
+
+MLAconfig = config(
+    # hyperparameters
+    batch_size = 4, # how many independent sequences will we process in parallel?
+    block_size = 1024, # what is the maximum context length for predictions?
+    vocab_size = 50304, # OPTIM 4 (along with grad clipping) brought dt from 95 to 90
+
+    max_iters = 500,
+    eval_interval = 50,
+    learning_rate = 3e-4,
+    warmup_steps = 25,
+    max_decay_steps = 75,
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu',
+    eval_iters = 200,
+    compile = False if os.name != 'posix' else True,
+    save_model = True,
+
+    n_embd = 768,
+    n_head = 8,
+    latent_dim = 32,
+    n_layer = 6,
+    dropout = 0.2,
+    total_batch_size = 2**16)
 
 class DataLoader:
     def __init__(self, B, T):
@@ -114,12 +138,12 @@ def parse_args():
     parser.add_argument('--eval_iters',    type=int,   default=config.eval_iters,    help='Number of iterations for evaluation')
     parser.add_argument('--n_embd',        type=int,   default=config.n_embd,        help='Number of embedding dimensions')
     parser.add_argument('--n_head',        type=int,   default=config.n_head,        help='Number of attention heads')
-    parser.add_argument('--n_kv_heads',    type=int,   default=config.n_kv_heads,    help='Number of key/value heads for GQA')
+    parser.add_argument('--latent_dim',    type=int,   default=config.latent_dim,    help='The latent compression dim in MHLA')
     parser.add_argument('--n_layer',       type=int,   default=config.n_layer,       help='Number of layers in the model')
     parser.add_argument('--dropout',       type=float, default=config.dropout,       help='Dropout rate')
     parser.add_argument('--vocab_size',    type=int,   default=config.vocab_size,    help='Vocabulary size for the model')
     parser.add_argument('--warmup_steps',  type=int,   default=config.warmup_steps,  help='Number of warmup steps for learning rate')
-    parser.add_argument('--max_decay_steps',type=int, default=config.max_decay_steps,help='Maximum decay steps for learning rate')
+    parser.add_argument('--max_decay_steps',type=int,  default=config.max_decay_steps,help='Maximum decay steps for learning rate')
     parser.add_argument('--total_batch_size_str', type=str,      default='2**16',    help='Total batch size for training passed in as a string expression')
     parser.add_argument('--compile', action='store_true', help='Whether to compile the model with torch.compile()')
     parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')

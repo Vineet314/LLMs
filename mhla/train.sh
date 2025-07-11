@@ -9,9 +9,9 @@ MAX_ITERS=1000
 LEARNING_RATE=0.0003
 DEVICE="cuda"
 EVAL_ITERS=200
-N_EMBD=256
+N_EMBD=512
 N_HEAD=8
-N_KV_HEADS=4  
+LATENT_DIM=64  
 N_LAYER=6   # We need to go deeper
 DROPOUT=0.2
 VOCAB_SIZE=50304
@@ -31,7 +31,7 @@ python mhla_train.py \
   --eval_iters $EVAL_ITERS \
   --n_embd $N_EMBD \
   --n_head $N_HEAD \
-  --n_kv_heads $N_KV_HEADS \
+  --latent_dim $LATENT_DIM \
   --n_layer $N_LAYER \
   --dropout $DROPOUT \
   --vocab_size $VOCAB_SIZE \

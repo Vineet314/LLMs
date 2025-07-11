@@ -32,7 +32,6 @@ class config:
     n_embd : int
     n_head : int
     n_layer : int
-    n_kv_heads : int # Set to 6 for MHA, 1 for MQA, or another divisor of n_head for GQA
     dropout : float
     total_batch_size : int
 
