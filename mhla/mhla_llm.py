@@ -8,73 +8,94 @@ Work in progress, not implemented yet.
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from math import sqrt
 import inspect
 
+class config:
+    # hyperparameters
+    batch_size : int # how many independent sequences will we process in parallel?
+    block_size : int  # what is the maximum context length for predictions?
+    vocab_size : int # OPTIM 4 (along with grad clipping) brought dt from 95 to 90
+
+    max_iters : int
+    eval_interval : int
+    learning_rate : float
+    warmup_steps : int
+    max_decay_steps : int
+
+    device : str
+    eval_iters : int
+    compile : bool #= False if os.name != 'posix' else True
+    save_model : bool
+
+    latent_dim : int
+    n_embd : int
+    n_head : int
+    n_layer : int
+    n_kv_heads : int # Set to 6 for MHA, 1 for MQA, or another divisor of n_head for GQA
+    dropout : float
+    total_batch_size : int
+
 class CausalSelfAttention(nn.Module):
-    """ Grouped-Query Attention """
-
-    def __init__(self, config):
+    """ A fully parallel implementation of the MHLA algorithm. No for loops. """
+    def __init__(self, config:config):
         super().__init__()
-        assert config.n_embd % config.n_head == 0, "n_embd must be divisible by n_head"
-        self.n_head  = config.n_head
-        # Check for n_kv_heads attribute in config, default to n_head for standard MHA
-        self.n_kv_heads = getattr(config, 'n_kv_heads', self.n_head)
-        assert self.n_head % self.n_kv_heads == 0, "n_head must be divisible by n_kv_heads"
-        self.n_embd  = config.n_embd
-        self.dropout = config.dropout
-        head_size = self.n_embd // self.n_head
+        self.config = config
+        assert config.n_embd % config.n_head == 0, "num of heads must be a divisor of n_embd"
+        self.head_size = config.n_embd // config.n_head
+        # Projection layers
+        self.W_dq  = nn.Linear(config.n_embd,     config.latent_dim, bias=False)  # Query down projection
+        self.W_uq  = nn.Linear(config.latent_dim, config.n_embd,     bias=False)  # Query up projection
+        self.W_dkv = nn.Linear(config.n_embd,     config.latent_dim, bias=False)  # Compress into latent KV space
+        self.W_uk  = nn.Linear(config.latent_dim, config.n_embd,     bias=False)  # Decompress K
+        self.W_uv  = nn.Linear(config.latent_dim, config.n_embd,     bias=False)  # Decompress V
+        self.W_o   = nn.Linear(config.n_embd,     config.n_embd,     bias=False)  # Final output projection
+        # self.ln  = nn.LayerNorm(config.latent_dim)
+        self.dropout = nn.Dropout(config.dropout)
+        self.register_buffer('k_abs', None)
+        self.register_buffer('v_abs', None)
+        self.register_buffer('tril', torch.tril(torch.ones(config.block_size, config.block_size)).unsqueeze(0).unsqueeze(0))
 
-        # k,q,v in a btach
-        # self.c_attn = nn.Linear(config.n_embd, 3*config.n_embd) # old, MHA.
-        # Total size for Q is n_embd. Total size for K and V is n_kv_heads * head_size each.
-        self.c_attn = nn.Linear(self.n_embd, self.n_embd + 2 * self.n_kv_heads * head_size)
-        # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
-        # regularization
-        self.attn_dropout  = nn.Dropout(config.dropout)
-        self.resid_dropout = nn.Dropout(config.dropout)
+    def forward(self, x:torch.Tensor, kv_cache=None) -> torch.Tensor:
 
+        B, T, C = x.size()
+        nh , nl, hs = self.config.n_head, self.config.latent_dim, self.config.n_embd//self.config.n_head
+        if self.k_abs is None:
+            k_absorbed = self.W_dq.weight.T @ self.W_uk.weight.T @ self.W_uk.weight # (C,nl) x (nl,C) x (C,nl) = (C,nl)
+            self.k_abs = k_absorbed.view(nh, hs, nl).unsqueeze(0) # (1, nh, hs, nl)
 
-    def forward(self, x, kv_cache=None):
-        # input of size (batch, time-step, channels) or (Batch, tokens, embeddings)
-        # output of size (batch, time-step, head size)
-        B,T,C = x.size()
-        head_size = C //self.n_head
-        # Calculate Q, K, V bt projecting input x
-        q_proj_size = self.n_embd
-        kv_proj_size = self.n_kv_heads * head_size
-        # q, k, v = self.c_attn(x).split(self.n_embd, dim=2) # this was for MHA
-        q, k, v = self.c_attn(x).split([q_proj_size, kv_proj_size, kv_proj_size], dim=2)
-        q = q.view(B, T, self.n_head,     head_size).transpose(1, 2) # (B, n_kvh, T, hs)
-        k = k.view(B, T, self.n_kv_heads, head_size).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_kv_heads, head_size).transpose(1, 2) # (B, n_kvh, T, hs)
+        if self.v_abs is None:
+            v_absorbed = self.W_uv.weight.T @ self.W_o.weight.T   # (nl, C) x (C, C) = (nl, C)
+            self.v_abs = v_absorbed.view(nl, nh, hs).transpose(0,1).unsqueeze(0) # (1, nh, nl, hs)
+        
+        new_c_kv = self.W_dkv(x)  # down projection : (B,T,C) -> (B,T,nl)
+        if kv_cache is None:
+            c_kv = new_c_kv # (B,T,nl) ; initiate cache
+        else:
+            c_kv = torch.cat([kv_cache, new_c_kv], dim=1) # append cache
+        
+        # Q*K^T = x * k_abs * c_kv^T   ### for variables, let q replace x, as q appears no where
+        # x -> (B,T,C)
+        q = x.view(B,T,nh,hs).transpose(1, 2) # (B,T,C) -> (B,T,nh,hs) -> (B, nh, T, hs)
 
-        if kv_cache is not None:
-            past_k, past_v = kv_cache
-            k = torch.cat((past_k, k), dim=-2)
-            v = torch.cat((past_v, v), dim=-2)
+        # now we have everything to compute attention scores, attn = q * k_abs * c_kv^T 
+        # (B, nh, T, hs) * (1, nh, hs, nl) * (B, 1, nl, T) = (B, nh, T, T)
+        # the following three steps can be made significatnly faster by avioding VRAM bottlenecks, perhaps by FlashMLA
+        attn = (q @ self.k_abs @ c_kv.transpose(1,2).unsqueeze(1)) / sqrt(hs) # (B, nh, T, T) # significatnly faster than **-0.5
+        attn = attn.masked_fill(self.tril[...,:T,:T] == 0, float('-inf'))
+        attn = self.dropout(F.softmax(attn, dim=-1))  # (B, nh, T, T)
 
-        updated_kv_cache = (k, v)
+        # final output : attn @ C_kv @ v_abs 
+        # (B, nh, T, T) * (B, 1, T, nl) * (1, nh, nl, hs) = (B, nh, T, hs)
+        y:torch.Tensor = attn @ c_kv.unsqueeze(1) @ self.v_abs  #(B, nh, T, hs)
+        y = self.dropout(y.transpose(1,2).contiguous().view(B,T,C))
 
-        # Before attention, repeat K and V heads to match Q heads
-        # basically copying K,V to perform MQA and GQA
-        if self.n_kv_heads != self.n_head:
-            num_repeats = self.n_head // self.n_kv_heads
-            k = k.repeat_interleave(num_repeats, dim=1)
-            v = v.repeat_interleave(num_repeats, dim=1)
-
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
-        y = y.transpose(1,2).contiguous().view(B,T,C)
-
-        # output projection
-        y = self.resid_dropout(self.c_proj(y))
-
-        return y, updated_kv_cache
+        return y, c_kv
        
 class MLP(nn.Module):
     """ a simple linear layer followed by a non-linearity """
 
-    def __init__(self, config):
+    def __init__(self, config:config):
         super().__init__()
         self.c_fc    = nn.Linear(config.n_embd, 4*config.n_embd)
         self.gelu    = nn.GELU()
@@ -106,7 +127,7 @@ class Block(nn.Module):
 
 class LLM(nn.Module):
     """ A simple GPT-like language model """
-    def __init__(self, config):
+    def __init__(self, config:config):
         super().__init__()
         self.config = config
         self.block_size = config.block_size
@@ -115,7 +136,7 @@ class LLM(nn.Module):
 
         self.transformer = nn.ModuleDict(dict(
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h    = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embd)))
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
