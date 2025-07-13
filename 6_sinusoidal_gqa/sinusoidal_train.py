@@ -217,7 +217,6 @@ if __name__ == '__main__':
 
     # Training
     print(f"total parameters = {model.get_num_params():,}")
-    # OPTIM 6: dt 68ms to 60ms
     optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=TrainingConfig.device,prints=False)
 
     # start training

@@ -126,7 +126,6 @@ class LLM(nn.Module):
         self.config = config
         self.block_size = config.block_size
         self.tkn_emb = nn.Embedding(config.vocab_size, config.n_embd)
-        # self.pos_emb = nn.Embedding(config.block_size, config.n_embd) # This uses learned pos embeddings
 
         pos_emb = torch.zeros(config.block_size, config.n_embd)
         position = torch.arange(0, config.block_size, dtype=torch.float).unsqueeze(1) 
@@ -150,7 +149,7 @@ class LLM(nn.Module):
 
         self.apply(self._init_weights)
 
-    def get_num_params(self, non_embedding=True):
+    def get_num_params(self):
         """
         Return the number of parameters in the model.
         For non-embedding count (default), the position embeddings get subtracted.

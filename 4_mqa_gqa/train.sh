@@ -4,7 +4,7 @@
 # Define default arguments
 BATCH_SIZE=8      # 2**3
 BLOCK_SIZE=1024   # 2**10
-MAX_ITERS=1000
+MAX_ITERS=5000
 # EVAL_INTERVAL=100 # might add an eval param later 
 LEARNING_RATE=0.0003
 DEVICE="cuda"
