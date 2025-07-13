@@ -9,7 +9,6 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from math import sqrt
-import inspect
 
 class config:
     # hyperparameters
@@ -35,7 +34,7 @@ class config:
     dropout : float
     total_batch_size : int
 
-class NaiveMHLA(nn.Module):
+class CausalSelfAttention(nn.Module):
     """ A fully parallel implementation of the MHLA algorithm. No for loops. 
     Currently does not support RoPE encodings. Thus Naive MHLA."""
     def __init__(self, config:config):
@@ -116,7 +115,7 @@ class Block(nn.Module):
     def __init__(self, config):
         # n_embd: embedding dimension, n_head: the number of heads we'd like
         super().__init__()
-        self.attn = NaiveMHLA(config)
+        self.attn = CausalSelfAttention(config)
         self.mlp  = MLP(config)
         self.ln1  = nn.LayerNorm(config.n_embd)
         self.ln2  = nn.LayerNorm(config.n_embd)
@@ -183,11 +182,10 @@ class LLM(nn.Module):
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
 
         # Create AdamW optimizer and use the fused version if it is available
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and "cuda" in device
-        print(f"using fused AdamW: {use_fused}")
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
-
+        try:
+            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=True)
+        except:
+            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate)
         if prints:
             print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
             print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
