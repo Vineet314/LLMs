@@ -17,7 +17,7 @@ import math
 from dataclasses import dataclass
 from time import time
 
-from mqa_gqa_llm import LLM
+from sinosudal_llm import LLM
 
 torch.set_float32_matmul_precision("high") # OPTIM 1 brought dt from 230 to 170
 

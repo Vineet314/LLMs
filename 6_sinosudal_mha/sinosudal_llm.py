@@ -1,12 +1,17 @@
 '''
-The number of Key/Value heads can be duplicated while keeping Query heads unique, for efficiecy and lower memory, at the cost of quality. 
-This code is just one step behind implementation of the Multi Head Latent Attention, which is better than MHA or MQA/GQA in almost every aspect.
+This code explores the sinosudal positional encodings, as introduced in Vaswani et. al.,
+"Attention is all you need" : https://arxiv.org/pdf/1706.03762/v1
+
+The previous models used learnable embeddings, but they increase computation are not very accurate.
+Thus, fixed encodings are preffered.
+
+It was decided to skip exploring integer and binary encodings, because sinosudal encodigns are just better, 
+and that is one step closer to RoPE.
 '''
 
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
-import inspect
+import torch.nn.functional as F
 
 class CausalSelfAttention(nn.Module):
     """ Grouped-Query Attention """
@@ -23,7 +28,6 @@ class CausalSelfAttention(nn.Module):
         head_size = self.n_embd // self.n_head
 
         # k,q,v in a btach
-        # self.c_attn = nn.Linear(config.n_embd, 3*config.n_embd) # old, MHA.
         # Total size for Q is n_embd. Total size for K and V is n_kv_heads * head_size each.
         self.c_attn = nn.Linear(self.n_embd, self.n_embd + 2 * self.n_kv_heads * head_size)
         # output projection
@@ -160,10 +164,13 @@ class LLM(nn.Module):
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
 
         # Create AdamW optimizer and use the fused version if it is available
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and "cuda" in device
+        use_fused = True and ("cuda" in device)
+        try:
+            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), fused=use_fused)
+        except:
+            use_fused = False
+            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate)
         print(f"using fused AdamW: {use_fused}")
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
 
         if prints:
             print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
