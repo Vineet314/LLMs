@@ -9,6 +9,7 @@ It was decided to skip exploring integer and binary encodings, because sinusoida
 and that is one step closer to RoPE.
 '''
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -125,7 +126,18 @@ class LLM(nn.Module):
         self.config = config
         self.block_size = config.block_size
         self.tkn_emb = nn.Embedding(config.vocab_size, config.n_embd)
-        # self.pos_emb = nn.Embedding(config.block_size, config.n_embd) # No longer needed
+        # self.pos_emb = nn.Embedding(config.block_size, config.n_embd) # This uses learned pos embeddings
+
+        pos_emb = torch.zeros(config.block_size, config.n_embd)
+        position = torch.arange(0, config.block_size, dtype=torch.float).unsqueeze(1) 
+
+        div_term = torch.exp(torch.arange(0, config.n_embd, 2).float() * (-math.log(10000.0) / config.n_embd))
+        #                   |________[0,2,4...n_embd]________|         * |______log(10000^(-1/d_model))_____| = e^log(10000^(-2i/d_model)) = 1 / 10000^(2i/d_model) 
+        # Calculate the sinusoidal encodings
+        pos_emb[:, 0::2] = torch.sin(position * div_term) # Even indices
+        pos_emb[:, 1::2] = torch.cos(position * div_term) # Odd indices
+
+        self.register_buffer('pos_emb', pos_emb)
 
         self.transformer = nn.ModuleDict(dict(
             drop = nn.Dropout(config.dropout),
@@ -145,9 +157,8 @@ class LLM(nn.Module):
         The token embeddings would too, except due to the parameter sharing these
         params are actually used as weights in the final layer, so we include them.
         """
+        # Since sinusoidal embeddings are fixed and not parameters, no subtraction is needed.
         n_params = sum(p.numel() for p in self.parameters())
-        if non_embedding:
-            n_params -= self.pos_emb.weight.numel()
         return n_params
 
     def _init_weights(self, module):
@@ -188,18 +199,19 @@ class LLM(nn.Module):
         return optimizer
 
     def forward(self, idx, targets=None, kv_caches=None):
-        b,t = idx.size()
-        assert t<=self.block_size, f"Maximum context window is {self.block_size} but got length {t}"
-        pos = torch.arange(0, t, dtype=torch.long, device=idx.device).unsqueeze(0)
+        b, t = idx.size()
+        assert t <= self.block_size, f"Maximum context window is {self.block_size} but got length {t}"
+        # Determine the starting position for positional encoding.
+        # If there's a KV cache, the new tokens are being added after the cached sequence.
+        start_pos = kv_caches[0][0].shape[-2] if kv_caches is not None else 0
 
-        if kv_caches is not None:
-            # During generation with KV caching, we are only passing the new token
-            # so the position embedding should be for the current timestep
-            pos = torch.tensor([[kv_caches[0][0].shape[-2]]], dtype=torch.long, device=idx.device)
-
-        tkn_emb = self.tkn_emb(idx)
-        pos_emb = self.pos_emb(pos)
-        x = self.transformer.drop(tkn_emb+pos_emb)
+        # Get token embeddings
+        tkn_emb = self.tkn_emb(idx) # (B, T, n_embd)
+        
+        # Get the correct positional embeddings for the current time steps
+        pos_emb = self.pos_emb[start_pos : start_pos + t, :] # (T, n_embd)
+        
+        x = self.transformer.drop(tkn_emb + pos_emb)
 
         updated_kv_caches = [] # list of tuples (k,v) for head of each Block
         for i, block in enumerate(self.transformer.h):
@@ -243,12 +255,12 @@ class LLM(nn.Module):
                 idx_cond = idx[:, -1:]
 
             logits, _, kv_caches = self(idx_cond, kv_caches=kv_caches)
-            # --- After the forward pass, prune the cache if it's too long ---
-            if kv_caches[0][0].shape[-2] > self.block_size:
-                for i in range(len(kv_caches)):
-                    k, v = kv_caches[i]
-                    # Slice the sequence dimension (T) to be at most block_size
-                    kv_caches[i] = (k[..., -self.block_size:, :], v[..., -self.block_size:, :])
+            # # --- After the forward pass, prune the cache if it's too long ---
+            # if kv_caches[0][0].shape[-2] > self.block_size:
+            #     for i in range(len(kv_caches)):
+            #         k, v = kv_caches[i]
+            #         # Slice the sequence dimension (T) to be at most block_size
+            #         kv_caches[i] = (k[..., -self.block_size:, :], v[..., -self.block_size:, :])
 
             logits = logits[:, -1, :] / temperature
             if top_k is not None:
