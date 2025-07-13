@@ -1,11 +1,11 @@
 '''
-This code explores the sinosudal positional encodings, as introduced in Vaswani et. al.,
+This code explores the sinusoidal positional encodings, as introduced in Vaswani et. al.,
 "Attention is all you need" : https://arxiv.org/pdf/1706.03762/v1
 
 The previous models used learnable embeddings, but they increase computation are not very accurate.
 Thus, fixed encodings are preffered.
 
-It was decided to skip exploring integer and binary encodings, because sinosudal encodigns are just better, 
+It was decided to skip exploring integer and binary encodings, because sinusoidal encodigns are just better, 
 and that is one step closer to RoPE.
 '''
 
@@ -13,15 +13,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class LLMconfig:
+    # hyperparameters
+    block_size : int  # what is the maximum context length for predictions?
+    vocab_size : int # OPTIM 4 (along with grad clipping) brought dt from 95 to 90
+    n_kv_heads : int
+    n_embd : int
+    n_head : int
+    n_layer: int
+    dropout: float
+
 class CausalSelfAttention(nn.Module):
     """ Grouped-Query Attention """
 
-    def __init__(self, config):
+    def __init__(self, config:LLMconfig):
         super().__init__()
         assert config.n_embd % config.n_head == 0, "n_embd must be divisible by n_head"
         self.n_head  = config.n_head
-        # Check for n_kv_heads attribute in config, default to n_head for standard MHA
-        self.n_kv_heads = getattr(config, 'n_kv_heads', self.n_head)
+
+        self.n_kv_heads = config.n_kv_heads
         assert self.n_head % self.n_kv_heads == 0, "n_head must be divisible by n_kv_heads"
         self.n_embd  = config.n_embd
         self.dropout = config.dropout
@@ -78,7 +88,7 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     """ a simple linear layer followed by a non-linearity """
 
-    def __init__(self, config):
+    def __init__(self, config:LLMconfig):
         super().__init__()
         self.c_fc    = nn.Linear(config.n_embd, 4*config.n_embd)
         self.gelu    = nn.GELU()
@@ -94,7 +104,7 @@ class MLP(nn.Module):
 class Block(nn.Module):
     """ Transformer block: communication followed by computation """
 
-    def __init__(self, config):
+    def __init__(self, config:LLMconfig):
         # n_embd: embedding dimension, n_head: the number of heads we'd like
         super().__init__()
         self.attn = CausalSelfAttention(config)
@@ -110,12 +120,12 @@ class Block(nn.Module):
 
 class LLM(nn.Module):
     """ A simple GPT-like language model """
-    def __init__(self, config):
+    def __init__(self, config:LLMconfig):
         super().__init__()
         self.config = config
         self.block_size = config.block_size
         self.tkn_emb = nn.Embedding(config.vocab_size, config.n_embd)
-        self.pos_emb = nn.Embedding(config.block_size, config.n_embd)
+        # self.pos_emb = nn.Embedding(config.block_size, config.n_embd) # No longer needed
 
         self.transformer = nn.ModuleDict(dict(
             drop = nn.Dropout(config.dropout),
