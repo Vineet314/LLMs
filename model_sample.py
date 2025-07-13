@@ -1,29 +1,31 @@
-r'''
+'''
 This script loads a pre-trained LLM model and generates text from it.
 It offers better argument parsing and a more robust way to load the model.
 
+IMPORTATNT : For some reason, the model you want to run, should be on the same dir as this file. Idk why, will fix this later.
+
 To run this script:
-python Single\ GPU/sample.py --model_path flash_llm_model.pt --max_new_tokens 500 --start_text "Hello, world" --device cuda
+python model_sample.py --model_path=2_flash/flash_llm_model.pt --max_new_tokens=500 --start_text="Hello, world" --device="cuda"
+or run ./sample.sh
 '''
 
-import sys
 import os
-import argparse
+import sys
 import torch
+import argparse
 import tiktoken
 from time import time
+
+class LLMconfig : pass
+class config : pass
 
 # Add the parent directory to the sys.path to find the 'models' directory
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Import the LLM model definition (assuming it's in models/flash_llm.py)
-class config:
-    pass
-
 def parse_args():
     """Parses command-line arguments for the sampling script."""
     parser = argparse.ArgumentParser(description='Load a pre-trained LLM model and sample text.')
-    parser.add_argument('--model_path',     type=str,   default="flash_llm_model.pt",help='Path to the pre-trained model checkpoint.')
+    parser.add_argument('--model_path',     type=str,   default=None,help='Path to the pre-trained model checkpoint.')
     parser.add_argument('--max_new_tokens', type=int,   default=500,    help='Maximum number of new tokens to generate.')
     parser.add_argument('--temperature',    type=float, default=1.0,    help='Sampling temperature. Higher values make output more random.')
     parser.add_argument('--top_k',          type=int,   default=None,   help='Top-k sampling: sample from the top k most probable tokens.')
@@ -34,12 +36,14 @@ def parse_args():
 
 def main():
     args = parse_args()
-
+    model_path = args.model_path
+    if args.model_path is None: 
+        model_path = "6_sinusoidal_gqa/mqa_gqa_llm_model.pt"
     # Determine the device
     device = torch.device(args.device)
     print(f"Using device: {device}")
 
-    model = torch.load(args.model_path, map_location=device, weights_only=False)
+    model = torch.load(model_path, map_location=device, weights_only=False)
 
     if args.compile:
         print("\ncompiling model...")
