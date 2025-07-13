@@ -184,7 +184,7 @@ def main(model:LLM, TrainingConfig:Trainconfig, ModelConfig:LLMconfig, optimizer
             loss.backward()
 
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        lr = get_lr(iter, Trainconfig) # OPTIM 5 : i plugged in,now its almost 68ms
+        lr = get_lr(iter, TrainingConfig) # OPTIM 5 : i plugged in,now its almost 68ms
         for param_grp in optimizer.param_groups:
             param_grp['lr'] = lr
         optimizer.step()
@@ -205,7 +205,7 @@ if __name__ == '__main__':
             value = eval(value)
             setattr(TrainingConfig, 'total_batch_size', value)
         else:
-            if hasattr(Trainconfig, key):
+            if hasattr(TrainingConfig, key):
                 setattr(TrainingConfig, key, value)
             else:
                 setattr(ModelConfig, key, value)
