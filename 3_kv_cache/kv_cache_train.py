@@ -2,7 +2,7 @@
 This code is highly inspired by Andrej Karpathy's work on his nanoGPT :
 https://github.com/karpathy/nanoGPT
 
-This script is to be run from LLMs dir as : LLMs/single_gpu/kv_cache/train.sh
+This script is to be run as : ./train.sh
 '''
 
 import sys

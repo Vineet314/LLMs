@@ -22,7 +22,7 @@ COMPILE=true
 SAVE_MODEL=true
 
 # Run the training script with arguments
-python mqa_gqa_train.py \
+python sinusoidal_train.py \
   --batch_size $BATCH_SIZE \
   --block_size $BLOCK_SIZE \
   --max_iters $MAX_ITERS \
