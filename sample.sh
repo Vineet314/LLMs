@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Define default arguments
-MODEL_PATH="6_sinusoidal_gqa/mqa_gqa_llm_model.pt"
-MAX_NEW_TOKENS=500
-START_TEXT="crazy bro"
+MODEL_PATH="7_rope_gqa/rope_llm_model.pt"
+MAX_NEW_TOKENS=512
+START_TEXT="speak"
 DEVICE="cuda"
 TEMPERATURE=1.0
 TOP_K=""  # Leave blank to omit top_k
