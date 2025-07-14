@@ -1,18 +1,13 @@
 '''
-This code explores the sinusoidal positional encodings, as introduced in Vaswani et. al.,
-"Attention is all you need" : https://arxiv.org/pdf/1706.03762/v1
-
-The previous models used learnable embeddings, but they increase computation are not very accurate.
-Thus, fixed encodings are preffered.
-
-It was decided to skip exploring integer and binary encodings, because sinusoidal encodigns are just better, 
-and that is one step closer to RoPE.
+This code is updated to use Rotary Positional Encodings (RoPE).
+RoPE applies rotations to the query and key vectors to encode positional information,
+offering benefits like better generalization to different sequence lengths.
 '''
 
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor # type hints
 
 class LLMconfig:
     # hyperparameters
@@ -24,8 +19,27 @@ class LLMconfig:
     n_layer: int
     dropout: float
 
+    def apply_rotary_emb(x:Tensor, freqs_cis:Tensor):
+        # x is either the query or the key whose embeddings are to be rotated two at a time.
+        # H below is either the number of total query heads(nh) or number of k-v heads (n_kvh)
+        # hs is the embedding dimension for the query/key, given by n_embd//nh
+        B,T,H,_ = x.size()
+        x_ = x.float().reshape(B, T, H, -1, 2)          # (B, T, H, hs)       -> (B, T, H, hs//2, 2)    -> creates the two pairs in the embd dim
+        x_re, x_im = x_.unbind(-1)                      # (B, T, H, hs//2, 2) -> (B, T, H, hs//2)       -> splits those two pairs
+        freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(2) # (T, hs//2)          -> (1, T, 1, hs//2)       -> this has dtype complex64, so last dim has two parts, real and imaginary
+        # freq_cis has two parts : real and imaginary (cosθ, sinθ)
+        
+        # Perform the rotation (vector * rotation matrix)
+        x_re_out = x_re*freqs_cis.real - x_im*freqs_cis.imag    # (B, T, H, hs//2) * (1, T, 1, hs//2) - (B, T, H, hs//2) * (1, T, 1, hs//2) -> (B, T, H, hs//2)
+        x_im_out = x_re*freqs_cis.imag + x_im*freqs_cis.real    # (B, T, H, hs//2) * (1, T, 1, hs//2) + (B, T, H, hs//2) * (1, T, 1, hs//2) -> (B, T, H, hs//2)
+        
+        # Stack the real and imaginary parts back together
+        x_out = torch.stack([x_re_out, x_im_out], dim=-1).flatten(3) # (B, T, H, hs//2), (B, T, H, hs//2) -> (B, T, H, hs)
+
+        return x_out.type_as(x)
+
 class CausalSelfAttention(nn.Module):
-    """ Grouped-Query Attention """
+    """ Grouped-Query Attention with RoPE """
 
     def __init__(self, config:LLMconfig):
         super().__init__()
@@ -47,20 +61,21 @@ class CausalSelfAttention(nn.Module):
         self.attn_dropout  = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
+    def forward(self, x:Tensor, freqs_cis, kv_cache=None):
+        B, T, C = x.size()
+        head_size = C // self.n_head
 
-    def forward(self, x, kv_cache=None):
-        # input of size (batch, time-step, channels) or (Batch, tokens, embeddings)
-        # output of size (batch, time-step, head size)
-        B,T,C = x.size()
-        head_size = C //self.n_head
-        # Calculate Q, K, V bt projecting input x
         q_proj_size = self.n_embd
         kv_proj_size = self.n_kv_heads * head_size
         # q, k, v = self.c_attn(x).split(self.n_embd, dim=2) # this was for MHA
         q, k, v = self.c_attn(x).split([q_proj_size, kv_proj_size, kv_proj_size], dim=2)
-        q = q.view(B, T, self.n_head,     head_size).transpose(1, 2) # (B, n_kvh, T, hs)
-        k = k.view(B, T, self.n_kv_heads, head_size).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_kv_heads, head_size).transpose(1, 2) # (B, n_kvh, T, hs)
+        q:Tensor = q.view(B, T, self.n_head, head_size) # (B, T, nh, hs)
+        k:Tensor = k.view(B, T, self.n_kv_heads, head_size) # (B, T, n_kvh, hs)
+        v:Tensor = v.view(B, T, self.n_kv_heads, head_size).transpose(1, 2) # (B, n_kvh, T, hs)
+
+        # Apply RoPE
+        q = LLMconfig.apply_rotary_emb(q, freqs_cis).transpose(1, 2) # (B, nh, T, hs)
+        k = LLMconfig.apply_rotary_emb(k, freqs_cis).transpose(1, 2) # (B, n_kvh, T, hs)
 
         if kv_cache is not None:
             past_k, past_v = kv_cache
@@ -113,30 +128,19 @@ class Block(nn.Module):
         self.ln1  = nn.LayerNorm(config.n_embd)
         self.ln2  = nn.LayerNorm(config.n_embd)
 
-    def forward(self, x, kv_cache=None):
-        attn_output, updated_kv_cache = self.attn(self.ln1(x), kv_cache=kv_cache)
+    def forward(self, x, freqs_cis, kv_cache=None):
+        attn_output, updated_kv_cache = self.attn(self.ln1(x), freqs_cis, kv_cache=kv_cache)
         x = x + attn_output
         x = x + self.mlp(self.ln2(x))
         return x, updated_kv_cache
 
 class LLM(nn.Module):
-    """ A simple GPT-like language model """
+    """ A simple GPT-like language model with RoPE """
     def __init__(self, config:LLMconfig):
         super().__init__()
         self.config = config
         self.block_size = config.block_size
         self.tkn_emb = nn.Embedding(config.vocab_size, config.n_embd)
-
-        pos_emb = torch.zeros(config.block_size, config.n_embd)
-        position = torch.arange(0, config.block_size, dtype=torch.float).unsqueeze(1) 
-
-        div_term = torch.exp(torch.arange(0, config.n_embd, 2).float() * (-math.log(10000.0) / config.n_embd))
-        #                   |________[0,2,4...n_embd]________|         * |______log(10000^(-1/d_model))_____| = e^log(10000^(-2i/d_model)) = 1 / 10000^(2i/d_model) 
-        # Calculate the sinusoidal encodings
-        pos_emb[:, 0::2] = torch.sin(position * div_term) # Even indices
-        pos_emb[:, 1::2] = torch.cos(position * div_term) # Odd indices
-
-        self.register_buffer('pos_emb', pos_emb)
 
         self.transformer = nn.ModuleDict(dict(
             drop = nn.Dropout(config.dropout),
@@ -146,17 +150,20 @@ class LLM(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
         self.tkn_emb.weight  = self.lm_head.weight
+        self.register_buffer("freqs_cis", self.precompute_freqs_cis(seq_len=self.block_size, head_size=config.n_embd // config.n_head))
 
         self.apply(self._init_weights)
 
+    def precompute_freqs_cis(self, seq_len:int, head_size, base=10000.0)->Tensor:
+        assert head_size % 2 ==0 , "please use even dimension, preferably an exponent of 2"
+        freqs:Tensor = 1.0 / (base ** (torch.arange(0, head_size, 2).float() / head_size)) # size : (head_size//2)
+        tokens = torch.arange(seq_len, device=freqs.device)                          # size : (seq_len)
+        freqs  = torch.outer(tokens, freqs)                                          # size : (seq_len , (head_size//2))
+        freqs_cis = torch.polar(torch.ones_like(freqs), freqs)   #complex64          # size : (seq_len , (head_size//2))
+        #                      |_________r_________|    |_θ_| -> gives r(cosθ+i.sin(θ))  -> essentially the rotation matrix for every token and pairs of embeddings stored as a matrix
+        return freqs_cis
+
     def get_num_params(self):
-        """
-        Return the number of parameters in the model.
-        For non-embedding count (default), the position embeddings get subtracted.
-        The token embeddings would too, except due to the parameter sharing these
-        params are actually used as weights in the final layer, so we include them.
-        """
-        # Since sinusoidal embeddings are fixed and not parameters, no subtraction is needed.
         n_params = sum(p.numel() for p in self.parameters())
         return n_params
 
@@ -169,11 +176,7 @@ class LLM(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def configure_optimizers(self, weight_decay, learning_rate, device, prints=False):
-        # start with all of the candidate parameters (that require grad)
-        param_dict = {pn: p for pn, p in self.named_parameters()}
-        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
-        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
         decay_params = [p for p in param_dict.values() if p.dim() >= 2]
         nodecay_params = [p for p in param_dict.values() if p.dim() < 2]
         optim_groups = [
@@ -183,8 +186,7 @@ class LLM(nn.Module):
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
 
-        # Create AdamW optimizer and use the fused version if it is available
-        use_fused = True and ("cuda" in device)
+        use_fused = "cuda" in device
         try:
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), fused=use_fused)
         except:
@@ -204,17 +206,14 @@ class LLM(nn.Module):
         # If there's a KV cache, the new tokens are being added after the cached sequence.
         start_pos = kv_caches[0][0].shape[-2] if kv_caches is not None else 0
 
-        # Get token embeddings
-        tkn_emb = self.tkn_emb(idx) # (B, T, n_embd)
-        
-        # Get the correct positional embeddings for the current time steps
-        pos_emb = self.pos_emb[start_pos : start_pos + t, :] # (T, n_embd)
-        
-        x = self.transformer.drop(tkn_emb + pos_emb)
+        tkn_emb = self.tkn_emb(idx)
+        freqs_cis = self.freqs_cis[start_pos : start_pos + t]
 
-        updated_kv_caches = [] # list of tuples (k,v) for head of each Block
+        x = self.transformer.drop(tkn_emb)
+
+        updated_kv_caches = []
         for i, block in enumerate(self.transformer.h):
-            x, updated_kv_cache = block(x, kv_cache=kv_caches[i] if kv_caches is not None else None)
+            x, updated_kv_cache = block(x, freqs_cis, kv_cache=kv_caches[i] if kv_caches is not None else None)
             updated_kv_caches.append(updated_kv_cache)
         
         x = self.transformer.ln_f(x)
@@ -254,12 +253,6 @@ class LLM(nn.Module):
                 idx_cond = idx[:, -1:]
 
             logits, _, kv_caches = self(idx_cond, kv_caches=kv_caches)
-            # # --- After the forward pass, prune the cache if it's too long ---
-            # if kv_caches[0][0].shape[-2] > self.block_size:
-            #     for i in range(len(kv_caches)):
-            #         k, v = kv_caches[i]
-            #         # Slice the sequence dimension (T) to be at most block_size
-            #         kv_caches[i] = (k[..., -self.block_size:, :], v[..., -self.block_size:, :])
 
             logits = logits[:, -1, :] / temperature
             if top_k is not None:
