@@ -14,7 +14,8 @@ class LLMconfig:
     # hyperparameters
     block_size : int  # what is the maximum context length for predictions?
     vocab_size : int # OPTIM 4 (along with grad clipping) brought dt from 95 to 90
-    latent_dim : int
+    q_latent_dim : int
+    kv_latent_dim : int
     n_embd : int
     n_head : int
     n_layer: int
@@ -29,12 +30,13 @@ class CausalSelfAttention(nn.Module):
         assert config.n_embd % config.n_head == 0, "num of heads must be a divisor of n_embd"
         self.head_size = config.n_embd // config.n_head
 
-        self.W_q   = nn.Linear(config.n_embd,     config.n_embd,     bias=False)
-        self.W_dkv = nn.Linear(config.n_embd,     config.latent_dim, bias=False)
-        self.W_uk  = nn.Linear(config.latent_dim, config.n_embd,     bias=False)
-        self.W_uv  = nn.Linear(config.latent_dim, config.n_embd,     bias=False)
-        self.W_o   = nn.Linear(config.n_embd,     config.n_embd,     bias=False)
-        # self.ln  = nn.LayerNorm(config.latent_dim)
+        self.W_dq  = nn.Linear(config.n_embd,        config.q_latent_dim,  bias=False)
+        self.W_uq  = nn.Linear(config.q_latent_dim,  config.n_embd,        bias=False)
+        self.W_dkv = nn.Linear(config.n_embd,        config.kv_latent_dim, bias=False)
+        self.W_uk  = nn.Linear(config.kv_latent_dim, config.n_embd,        bias=False)
+        self.W_uv  = nn.Linear(config.kv_latent_dim, config.n_embd,        bias=False)
+        self.W_o   = nn.Linear(config.n_embd,       config.n_embd,         bias=False)
+        # self.ln  = nn.LayerNorm(config.kv_latent_dim)
         self.dropout = nn.Dropout(config.dropout)
 
         # Attributes to store pre-computed matrices for inference (now using register_buffer)
@@ -48,36 +50,36 @@ class CausalSelfAttention(nn.Module):
         if (self._k_absorbed_inference is not None) and (self._v_absorbed_inference is not None):
             return 
         
-        nh , nl, hs = self.config.n_head, self.config.latent_dim, self.config.n_embd//self.config.n_head
+        nh , n_kvl, hs = self.config.n_head, self.config.kv_latent_dim, self.config.n_embd//self.config.n_head
         with torch.no_grad():
-            self._k_absorbed_inference = (self.W_q.weight.T  @ self.W_uk.weight).view(nh, hs, nl).unsqueeze(0)
-            self._v_absorbed_inference = (self.W_uv.weight.T @ self.W_o.weight.T).view(nl, nh, hs).transpose(0,1).unsqueeze(0)    
+            self._k_absorbed_inference = (self.W_dq.weight.T @ self.W_uq.weight.T  @ self.W_uk.weight).view(nh, hs, n_kvl).unsqueeze(0)
+            self._v_absorbed_inference = (self.W_uv.weight.T @ self.W_o.weight.T).view(n_kvl, nh, hs).transpose(0,1).unsqueeze(0)    
 
     def forward(self, x:torch.Tensor, kv_cache=None) -> tuple[torch.Tensor, torch.Tensor]:
 
         B, T, C = x.size()
-        nh , nl, hs = self.config.n_head, self.config.latent_dim, self.config.n_embd//self.config.n_head
+        nh, n_kvl, hs = self.config.n_head, self.config.kv_latent_dim, self.config.n_embd//self.config.n_head
 
         # k_eff and v_eff based on training or inference
         if self.training:
-            k_eff = (self.W_q.weight.T  @ self.W_uk.weight).view(nh, hs, nl).unsqueeze(0)
-            v_eff = (self.W_uv.weight.T @ self.W_o.weight.T).view(nl, nh, hs).transpose(0,1).unsqueeze(0)
+            k_eff = (self.W_dq.weight.T @ self.W_uq.weight.T  @ self.W_uk.weight).view(nh, hs, n_kvl).unsqueeze(0)
+            v_eff = (self.W_uv.weight.T @ self.W_o.weight.T).view(n_kvl, nh, hs).transpose(0,1).unsqueeze(0)
         else:
-            if self._k_absorbed_inference is None or self._v_absorbed_inference is None:
+            if (self._k_absorbed_inference is None) or (self._v_absorbed_inference is None):
                 self._precompute_absorbed_matrices()
             k_eff = self._k_absorbed_inference
             v_eff = self._v_absorbed_inference
         
-        new_c_kv = self.W_dkv(x) # down projection : (B,T,C) -> (B,T,nl)
+        new_c_kv = self.W_dkv(x) # down projection : (B,T,C) -> (B,T,n_kvl)
 
         if kv_cache is None:
-            c_kv = new_c_kv # (B,T,nl) ; initiate cache
+            c_kv = new_c_kv # (B,T,n_kvl) ; initiate cache
         else:
             c_kv = torch.cat([kv_cache, new_c_kv], dim=1) # append cache
 
         T_full = c_kv.size(1) # Current total sequence length (including cache)
 
-        q:torch.Tensor = self.W_q(x) # query projection : (B,T,C) -> (B,T,C)
+        q:torch.Tensor = self.W_uq(self.W_dq(x)) # query projection : (B,T,C) -> (B,T,n_ql) -> (B,T,C)
         q = q.view(B, T, nh, hs).transpose(1, 2) # (B,T,C) -> (B,T,nh,hs) -> (B, nh, T, hs)
 
         # Attention score using the effective k_eff
@@ -97,7 +99,7 @@ class CausalSelfAttention(nn.Module):
         attn = self.dropout(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
 
         # final output : attn @ C_kv @ v_abs 
-        # (B, nh, T, T) * (B, 1, T, nl) * (1, nh, nl, hs) = (B, nh, T, hs)
+        # (B, nh, T, T) * (B, 1, T, n_kvl) * (1, nh, n_kvl, hs) = (B, nh, T, hs)
         y:torch.Tensor = attn @ c_kv.unsqueeze(1) @ v_eff #(B, nh, T, hs)
         y = self.dropout(y.transpose(1,2).contiguous().view(B,T,C))
 
