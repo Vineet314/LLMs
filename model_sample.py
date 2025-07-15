@@ -37,7 +37,8 @@ def parse_args():
 def main():
     args = parse_args()
     model_path = args.model_path
-    if args.model_path is None: 
+    if args.model_path is None:
+        print("No model path provided, using 6_sinusoidal_gqa/mqa_gqa_llm_model.pt")
         model_path = "6_sinusoidal_gqa/mqa_gqa_llm_model.pt"
     # Determine the device
     device = torch.device(args.device)
