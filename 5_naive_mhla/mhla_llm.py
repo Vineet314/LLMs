@@ -10,85 +10,95 @@ import torch.nn as nn
 from torch.nn import functional as F
 from math import sqrt
 
-class config:
+class LLMconfig:
     # hyperparameters
-    batch_size : int # how many independent sequences will we process in parallel?
     block_size : int  # what is the maximum context length for predictions?
     vocab_size : int # OPTIM 4 (along with grad clipping) brought dt from 95 to 90
-
-    max_iters : int
-    eval_interval : int
-    learning_rate : float
-    warmup_steps : int
-    max_decay_steps : int
-
-    device : str
-    eval_iters : int
-    compile : bool #= False if os.name != 'posix' else True
-    save_model : bool
-
     latent_dim : int
     n_embd : int
     n_head : int
-    n_layer : int
-    dropout : float
-    total_batch_size : int
+    n_layer: int
+    dropout: float
 
 class CausalSelfAttention(nn.Module):
     """ A fully parallel implementation of the MHLA algorithm. No for loops. 
     Currently does not support RoPE encodings. Thus Naive MHLA."""
-    def __init__(self, config:config):
+    def __init__(self, config:LLMconfig):
         super().__init__()
         self.config = config
         assert config.n_embd % config.n_head == 0, "num of heads must be a divisor of n_embd"
         self.head_size = config.n_embd // config.n_head
-        # Projection layers
-        self.W_dq  = nn.Linear(config.n_embd,     config.latent_dim, bias=False)  # Query down projection
-        self.W_uq  = nn.Linear(config.latent_dim, config.n_embd,     bias=False)  # Query up projection
-        self.W_dkv = nn.Linear(config.n_embd,     config.latent_dim, bias=False)  # Compress into latent KV space
-        self.W_uk  = nn.Linear(config.latent_dim, config.n_embd,     bias=False)  # Decompress K
-        self.W_uv  = nn.Linear(config.latent_dim, config.n_embd,     bias=False)  # Decompress V
-        self.W_o   = nn.Linear(config.n_embd,     config.n_embd,     bias=False)  # Final output projection
+
+        self.W_q   = nn.Linear(config.n_embd,     config.n_embd,     bias=False)
+        self.W_dkv = nn.Linear(config.n_embd,     config.latent_dim, bias=False)
+        self.W_uk  = nn.Linear(config.latent_dim, config.n_embd,     bias=False)
+        self.W_uv  = nn.Linear(config.latent_dim, config.n_embd,     bias=False)
+        self.W_o   = nn.Linear(config.n_embd,     config.n_embd,     bias=False)
         # self.ln  = nn.LayerNorm(config.latent_dim)
         self.dropout = nn.Dropout(config.dropout)
-        self.k_abs = None
-        self.v_abs = None
-        # self.register_buffer('k_abs', None)
-        # self.register_buffer('v_abs', None)
-        self.register_buffer('tril', torch.tril(torch.ones(config.block_size, config.block_size)).unsqueeze(0).unsqueeze(0))
 
-    def forward(self, x:torch.Tensor, kv_cache=None) -> torch.Tensor:
+        # Attributes to store pre-computed matrices for inference (now using register_buffer)
+        self.register_buffer('_k_absorbed_inference', None)
+        self.register_buffer('_v_absorbed_inference', None)
+        # self.register_buffer('tril', torch.tril(torch.ones(config.block_size, config.block_size)).unsqueeze(0).unsqueeze(0))
+
+    def _precompute_absorbed_matrices(self):
+        """Precomputes k_absorbed and v_absorbed for efficient inference."""
+        # Just to be safe
+        if (self._k_absorbed_inference is not None) and (self._v_absorbed_inference is not None):
+            return 
+        
+        nh , nl, hs = self.config.n_head, self.config.latent_dim, self.config.n_embd//self.config.n_head
+        with torch.no_grad():
+            self._k_absorbed_inference = (self.W_q.weight.T  @ self.W_uk.weight).view(nh, hs, nl).unsqueeze(0)
+            self._v_absorbed_inference = (self.W_uv.weight.T @ self.W_o.weight.T).view(nl, nh, hs).transpose(0,1).unsqueeze(0)    
+
+    def forward(self, x:torch.Tensor, kv_cache=None) -> tuple[torch.Tensor, torch.Tensor]:
 
         B, T, C = x.size()
         nh , nl, hs = self.config.n_head, self.config.latent_dim, self.config.n_embd//self.config.n_head
-        # if self.k_abs is None:
-        k_absorbed = self.W_dq.weight.T @ self.W_uq.weight.T @ self.W_uk.weight # (C,nl) x (nl,C) x (C,nl) = (C,nl)
-        self.k_abs = k_absorbed.view(nh, hs, nl).unsqueeze(0) # (1, nh, hs, nl)
 
-        # if self.v_abs is None:
-        v_absorbed = self.W_uv.weight.T @ self.W_o.weight.T   # (nl, C) x (C, C) = (nl, C)
-        self.v_abs = v_absorbed.view(nl, nh, hs).transpose(0,1).unsqueeze(0) # (1, nh, nl, hs)
+        # k_eff and v_eff based on training or inference
+        if self.training:
+            k_eff = (self.W_q.weight.T  @ self.W_uk.weight).view(nh, hs, nl).unsqueeze(0)
+            v_eff = (self.W_uv.weight.T @ self.W_o.weight.T).view(nl, nh, hs).transpose(0,1).unsqueeze(0)
+        else:
+            if self._k_absorbed_inference is None or self._v_absorbed_inference is None:
+                self._precompute_absorbed_matrices()
+            k_eff = self._k_absorbed_inference
+            v_eff = self._v_absorbed_inference
         
-        new_c_kv = self.W_dkv(x)  # down projection : (B,T,C) -> (B,T,nl)
+        new_c_kv = self.W_dkv(x) # down projection : (B,T,C) -> (B,T,nl)
+
         if kv_cache is None:
             c_kv = new_c_kv # (B,T,nl) ; initiate cache
         else:
             c_kv = torch.cat([kv_cache, new_c_kv], dim=1) # append cache
-        
-        # Q*K^T = x * k_abs * c_kv^T   ### for variables, let q replace x, as q appears no where
-        # x -> (B,T,C)
-        q = x.view(B,T,nh,hs).transpose(1, 2) # (B,T,C) -> (B,T,nh,hs) -> (B, nh, T, hs)
 
-        # now we have everything to compute attention scores, attn = q * k_abs * c_kv^T 
-        # (B, nh, T, hs) * (1, nh, hs, nl) * (B, 1, nl, T) = (B, nh, T, T)
-        # the following three steps can be made significatnly faster by avioding VRAM bottlenecks, perhaps by FlashMLA
-        attn = (q @ self.k_abs @ c_kv.transpose(1,2).unsqueeze(1)) / sqrt(hs) # (B, nh, T, T) # significatnly faster than **-0.5
-        attn = attn.masked_fill(self.tril[...,:T,:T] == 0, float('-inf'))
-        attn = self.dropout(F.softmax(attn, dim=-1))  # (B, nh, T, T)
+        T_full = c_kv.size(1) # Current total sequence length (including cache)
+
+        q:torch.Tensor = self.W_q(x) # query projection : (B,T,C) -> (B,T,C)
+        q = q.view(B, T, nh, hs).transpose(1, 2) # (B,T,C) -> (B,T,nh,hs) -> (B, nh, T, hs)
+
+        # Attention score using the effective k_eff
+        attn:torch.Tensor = (q @ k_eff @ c_kv.transpose(1,2).unsqueeze(1)) / sqrt(hs)
+
+        # Causal masking adapted for KV caching during training or inference
+        # query_global_indices: The global index of each query in the current input 'x'
+        # key_global_indices: The global index of each key in the full cached sequence 'c_kv'
+        # T is the length of the current input `x`. T_full is `T_prev_cache + T`.
+        # For a new query at relative index `i` (0 to T-1), its global index is `(T_full - T) + i`.
+        # It can attend to keys up to its global index.
+        query_global_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
+        key_global_indices   = torch.arange(T_full, device=x.device).unsqueeze(0)
+        causal_mask_expanded = (query_global_indices >= key_global_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
+
+        attn = attn.masked_fill(causal_mask_expanded == 0, float('-inf'))
+        attn = self.dropout(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
 
         # final output : attn @ C_kv @ v_abs 
         # (B, nh, T, T) * (B, 1, T, nl) * (1, nh, nl, hs) = (B, nh, T, hs)
-        y:torch.Tensor = attn @ c_kv.unsqueeze(1) @ self.v_abs  #(B, nh, T, hs)
+        y:torch.Tensor = attn @ c_kv.unsqueeze(1) @ v_eff #(B, nh, T, hs)
         y = self.dropout(y.transpose(1,2).contiguous().view(B,T,C))
 
         return y, c_kv
@@ -96,7 +106,7 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     """ a simple linear layer followed by a non-linearity """
 
-    def __init__(self, config:config):
+    def __init__(self, config:LLMconfig):
         super().__init__()
         self.c_fc    = nn.Linear(config.n_embd, 4*config.n_embd)
         self.gelu    = nn.GELU()
@@ -112,7 +122,7 @@ class MLP(nn.Module):
 class Block(nn.Module):
     """ Transformer block: communication followed by computation """
 
-    def __init__(self, config):
+    def __init__(self, config:LLMconfig):
         # n_embd: embedding dimension, n_head: the number of heads we'd like
         super().__init__()
         self.attn = CausalSelfAttention(config)
@@ -128,7 +138,7 @@ class Block(nn.Module):
 
 class LLM(nn.Module):
     """ A simple GPT-like language model """
-    def __init__(self, config:config):
+    def __init__(self, config:LLMconfig):
         super().__init__()
         self.config = config
         self.block_size = config.block_size
