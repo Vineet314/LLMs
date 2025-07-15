@@ -62,7 +62,7 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.size()
         nh , nl, hs = self.config.n_head, self.config.latent_dim, self.config.n_embd//self.config.n_head
         # if self.k_abs is None:
-        k_absorbed = self.W_dq.weight.T @ self.W_uk.weight.T @ self.W_uk.weight # (C,nl) x (nl,C) x (C,nl) = (C,nl)
+        k_absorbed = self.W_dq.weight.T @ self.W_uq.weight.T @ self.W_uk.weight # (C,nl) x (nl,C) x (C,nl) = (C,nl)
         self.k_abs = k_absorbed.view(nh, hs, nl).unsqueeze(0) # (1, nh, hs, nl)
 
         # if self.v_abs is None:
