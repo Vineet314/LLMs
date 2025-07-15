@@ -3,8 +3,6 @@ This code is highly inspired by Andrej Karpathy's work on his nanoGPT :
 https://github.com/karpathy/nanoGPT
 
 This script is to be run as : ./train.sh
-
-Work in progress, not implemented yet.
 '''
 
 import sys
@@ -21,56 +19,59 @@ from time import time
 
 from mhla_llm import LLM
 
-torch.set_float32_matmul_precision("high") # OPTIM 1 brought dt from 230 to 170
+torch.set_float32_matmul_precision("high")
 
 @dataclass
-class config:
+class LLMconfig:
     # hyperparameters
-    batch_size : int # how many independent sequences will we process in parallel?
     block_size : int  # what is the maximum context length for predictions?
-    vocab_size : int # OPTIM 4 (along with grad clipping) brought dt from 95 to 90
+    vocab_size : int 
+    q_latent_dim : int
+    kv_latent_dim : int
+    n_embd : int
+    n_head : int
+    n_layer: int
+    dropout: float
 
+@dataclass
+class Trainconfig:
+    total_batch_size : int
+    batch_size : int
     max_iters : int
+    eval : bool
     eval_interval : int
     learning_rate : float
     warmup_steps : int
     max_decay_steps : int
-
     device : str
     eval_iters : int
     compile : bool #= False if os.name != 'posix' else True
     save_model : bool
 
-    latent_dim : int
-    n_embd : int
-    n_head : int
-    n_layer : int
-    dropout : float
-    total_batch_size : int
-
-MLAconfig = config(
+ModelConfig = LLMconfig(
     # hyperparameters
-    batch_size = 8, # how many independent sequences will we process in parallel?
     block_size = 1024, # what is the maximum context length for predictions?
-    vocab_size = 50304, # OPTIM 4 (along with grad clipping) brought dt from 95 to 90
+    vocab_size = 50304,
+    kv_latent_dim = 32,
+    q_latent_dim = 32,
+    n_embd = 256,
+    n_head = 8,
+    n_layer= 6,
+    dropout= 0.2)
 
+TrainingConfig = Trainconfig(
+    total_batch_size = 2**13,
+    batch_size = 4, # how many independent sequences will we process in parallel?
     max_iters = 500,
+    eval = False,
     eval_interval = 50,
     learning_rate = 3e-4,
     warmup_steps = 25,
     max_decay_steps = 75,
-
     device = 'cuda' if torch.cuda.is_available() else 'cpu',
     eval_iters = 200,
     compile = False if os.name != 'posix' else True,
-    save_model = True,
-
-    n_embd = 512,
-    n_head = 8,
-    latent_dim = 32,
-    n_layer = 6,
-    dropout = 0.2,
-    total_batch_size = 2**13)
+    save_model = True)
 
 class DataLoader:
     def __init__(self, B, T):
@@ -97,7 +98,7 @@ class DataLoader:
             self.current_position = 0
         return x,y
 
-def get_lr(iter, config):
+def get_lr(iter, config:Trainconfig):
     max_lr = config.learning_rate
     min_lr = max_lr*0.1
     # 1) linear warump for warmup_steps:
@@ -114,7 +115,7 @@ def get_lr(iter, config):
         return min_lr + coeff * (max_lr - min_lr)
 
 @torch.no_grad()
-def estimate_loss(model:LLM, config:config, eval_loader:DataLoader):
+def estimate_loss(model:LLM, config:Trainconfig, eval_loader:DataLoader):
     out = {}
     model.eval()
     for split in ['train', 'val']:
@@ -129,42 +130,45 @@ def estimate_loss(model:LLM, config:config, eval_loader:DataLoader):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a simple LLM model')
-    parser.add_argument('--batch_size',    type=int,   default=MLAconfig.batch_size,    help='Batch size for training')
-    parser.add_argument('--block_size',    type=int,   default=MLAconfig.block_size,    help='Block size for training')
-    parser.add_argument('--max_iters',     type=int,   default=MLAconfig.max_iters,     help='Maximum number of iterations for training')
-    parser.add_argument('--eval_interval', type=int,   default=MLAconfig.eval_interval, help='Interval for evaluation')
-    parser.add_argument('--learning_rate', type=float, default=MLAconfig.learning_rate, help='Learning rate for training')
-    parser.add_argument('--device',        type=str,   default=MLAconfig.device,        help='Device to use for training (cpu or cuda)')
-    parser.add_argument('--eval_iters',    type=int,   default=MLAconfig.eval_iters,    help='Number of iterations for evaluation')
-    parser.add_argument('--n_embd',        type=int,   default=MLAconfig.n_embd,        help='Number of embedding dimensions')
-    parser.add_argument('--n_head',        type=int,   default=MLAconfig.n_head,        help='Number of attention heads')
-    parser.add_argument('--latent_dim',    type=int,   default=MLAconfig.latent_dim,    help='The latent compression dim in MHLA')
-    parser.add_argument('--n_layer',       type=int,   default=MLAconfig.n_layer,       help='Number of layers in the model')
-    parser.add_argument('--dropout',       type=float, default=MLAconfig.dropout,       help='Dropout rate')
-    parser.add_argument('--vocab_size',    type=int,   default=MLAconfig.vocab_size,    help='Vocabulary size for the model')
-    parser.add_argument('--warmup_steps',  type=int,   default=MLAconfig.warmup_steps,  help='Number of warmup steps for learning rate')
-    parser.add_argument('--max_decay_steps',type=int,  default=MLAconfig.max_decay_steps,help='Maximum decay steps for learning rate')
-    parser.add_argument('--total_batch_size_str', type=str,      default='2**16',    help='Total batch size for training passed in as a string expression')
+    parser.add_argument('--batch_size',    type=int,   default=TrainingConfig.batch_size,    help='Batch size for training')
+    parser.add_argument('--max_iters',     type=int,   default=TrainingConfig.max_iters,     help='Maximum number of iterations for training')
+    parser.add_argument('--eval_interval', type=int,   default=TrainingConfig.eval_interval, help='Interval for evaluation')
+    parser.add_argument('--learning_rate', type=float, default=TrainingConfig.learning_rate, help='Learning rate for training')
+    parser.add_argument('--warmup_steps',  type=int,   default=TrainingConfig.warmup_steps,  help='Number of warmup steps for learning rate')
+    parser.add_argument('--max_decay_steps',type=int,  default=TrainingConfig.max_decay_steps,help='Maximum decay steps for learning rate')
+    parser.add_argument('--device',        type=str,   default=TrainingConfig.device,        help='Device to use for training (cpu or cuda)')
+    parser.add_argument('--eval_iters',    type=int,   default=TrainingConfig.eval_iters,    help='Number of iterations for evaluation')
+
+    parser.add_argument('--block_size',    type=int,   default=ModelConfig.block_size,      help='Block size for training')
+    parser.add_argument('--vocab_size',    type=int,   default=ModelConfig.vocab_size,      help='Vocabulary size for the model')
+    parser.add_argument('--q_latent_dim',  type=int,   default=ModelConfig.q_latent_dim,    help='Number of key/value heads for GQA')
+    parser.add_argument('--kv_latent_dim', type=int,   default=ModelConfig.kv_latent_dim,   help='Number of key/value heads for GQA')
+    parser.add_argument('--n_embd',        type=int,   default=ModelConfig.n_embd,          help='Number of embedding dimensions')
+    parser.add_argument('--n_head',        type=int,   default=ModelConfig.n_head,          help='Number of attention heads')
+    parser.add_argument('--n_layer',       type=int,   default=ModelConfig.n_layer,         help='Number of layers in the model')
+    parser.add_argument('--dropout',       type=float, default=ModelConfig.dropout,         help='Dropout rate')
+    
+    parser.add_argument('--total_batch_size_str', type=str,      default='2**16',         help='Total batch size for training passed in as a string expression')
     parser.add_argument('--compile', action='store_true', help='Whether to compile the model with torch.compile()')
     parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
     return parser.parse_args()
 
-def main(model:LLM, config:config, optimizer:torch.optim.Optimizer):
-    B = config.batch_size
-    T = config.block_size
-    assert config.total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
-    grad_accum_steps = config.total_batch_size // (B * T)
+def main(model:LLM, TrainingConfig:Trainconfig, ModelConfig:LLMconfig, optimizer:torch.optim.Optimizer):
+    B = TrainingConfig.batch_size
+    T = ModelConfig.block_size
+    assert TrainingConfig.total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
+    grad_accum_steps = TrainingConfig.total_batch_size // (B * T)
 
-    train_loader = DataLoader(B=config.batch_size, T=config.block_size)
-    eval_loader  = DataLoader(B=config.batch_size, T=config.block_size)
+    train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size)
+    eval_loader  = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size)
 
-    for iter in range(config.max_iters):
+    for iter in range(TrainingConfig.max_iters):
         t3 = t4 = 0
         t0 = time() 
         # every once in a while evaluate the loss on train and val sets
-        # if iter % config.eval_interval == 0 or iter == config.max_iters - 1:
+        # if iter % ModelConfig.eval_interval == 0 or iter == ModelConfig.max_iters - 1:
             # t3 = time()
-        #     losses = estimate_loss(model, config, eval_loader)
+        #     losses = estimate_loss(model, ModelConfig, eval_loader)
             # print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
             # t4 = time()
         optimizer.zero_grad(set_to_none=True)
@@ -172,19 +176,19 @@ def main(model:LLM, config:config, optimizer:torch.optim.Optimizer):
 
         for micro_step in range(grad_accum_steps):
             x, y = train_loader.next_batch()
-            x,y = x.to(device=config.device), y.to(device=config.device)
+            x,y = x.to(device=TrainingConfig.device), y.to(device=TrainingConfig.device)
             # evaluate the loss
-            if torch.cuda.is_bf16_supported(): # OPTIM 2 brought dt from 170 to 130
-                with torch.autocast(device_type=config.device, dtype=torch.bfloat16):
+            if torch.cuda.is_bf16_supported():
+                with torch.autocast(device_type=TrainingConfig.device, dtype=torch.bfloat16):
                     _, loss, _ = model(x,y)
             else: # need to learn about gradient scalers 
                 _, loss, _ = model(x,y)
-            loss = loss/grad_accum_steps
+            loss:torch.Tensor = loss/grad_accum_steps
             loss_accum += loss.detach()  
             loss.backward()
 
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        lr = get_lr(iter, config) # OPTIM 5 : i plugged in,now its almost 68ms
+        lr = get_lr(iter, TrainingConfig)
         for param_grp in optimizer.param_groups:
             param_grp['lr'] = lr
         optimizer.step()
@@ -193,9 +197,9 @@ def main(model:LLM, config:config, optimizer:torch.optim.Optimizer):
         dt = (t1-t0-(t4-t3))*1000
         print(f"step: {iter} | train loss:{loss_accum:.4f} | dt: {dt:.2f}ms | grad_acum_steps:{grad_accum_steps}")
 
-    if config.save_model:
-        torch.save(model, 'mqa_gqa_llm_model.pt')
-        print("\nsaved run to mqa_gqa_llm_model.pt")
+    if TrainingConfig.save_model:
+        torch.save(model, 'mhla_model.pt')
+        print("\nsaved run to mhla_model.pt")
 
 if __name__ == '__main__':
     args = parse_args()
@@ -203,19 +207,21 @@ if __name__ == '__main__':
         # need to eval the total_batch_size to get the grad_accum_steps
         if key == 'total_batch_size_str':
             value = eval(value)
-            setattr(config, 'total_batch_size', value)
+            setattr(TrainingConfig, 'total_batch_size', value)
         else:
-            setattr(config, key, value)
+            if hasattr(TrainingConfig, key):
+                setattr(TrainingConfig, key, value)
+            else:
+                setattr(ModelConfig, key, value)
 
-    model = LLM(config).to(config.device)
-    if config.compile: # OPTIM 3 brought dt from 130 to 95ms
+    model = LLM(ModelConfig).to(TrainingConfig.device)
+    if TrainingConfig.compile: 
         print("Compiling the model with torch.compile()")
         model = torch.compile(model)
 
     # Training
     print(f"total parameters = {model.get_num_params():,}")
-    # OPTIM 6: dt 68ms to 60ms
-    optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=config.learning_rate,device=config.device,prints=False)
+    optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=TrainingConfig.device,prints=False)
 
     # start training
-    main(model, config, optimizer)
+    main(model=model, TrainingConfig=TrainingConfig, ModelConfig=ModelConfig, optimizer=optimizer)

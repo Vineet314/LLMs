@@ -7,7 +7,7 @@ This code builds a transformer based LLM which uses the 'Low-Rank Key-Value Join
 
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
+import torch.nn.functional as F
 from math import sqrt
 
 class LLMconfig:
