@@ -13,7 +13,7 @@ from math import sqrt
 class LLMconfig:
     # hyperparameters
     block_size : int  # what is the maximum context length for predictions?
-    vocab_size : int # OPTIM 4 (along with grad clipping) brought dt from 95 to 90
+    vocab_size : int 
     q_latent_dim : int
     kv_latent_dim : int
     n_embd : int
@@ -203,21 +203,26 @@ class LLM(nn.Module):
             print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
         return optimizer
 
-    def forward(self, idx, targets=None, kv_caches=None):
+    def forward(self, idx:torch.Tensor, targets=None, kv_caches:torch.Tensor=None):
         b,t = idx.size()
-        assert t<=self.block_size, f"Maximum context window is {self.block_size} but got length {t}"
-        pos = torch.arange(0, t, dtype=torch.long, device=idx.device).unsqueeze(0)
+        # assert t<=self.block_size, f"Maximum context window is {self.block_size} but got length {t}"       
 
         if kv_caches is not None:
-            # During generation with KV caching, we are only passing the new token
-            # so the position embedding should be for the current timestep
-            pos = torch.tensor([[kv_caches[0][0].shape[-2]]], dtype=torch.long, device=idx.device)
+            # During generation with KV caching, 'idx' will contain only the new token(s).
+            # The position starts from the length of the existing cache.
+            # kv_caches[0][0].shape[-2] gives the current sequence length in the cache
+            # The input idx has length 't', so positions should be [cache_len, cache_len + 1, ..., cache_len + t - 1]
+            pos_offset = kv_caches[0][0].shape[-2] 
+            pos = torch.arange(pos_offset, pos_offset + t, dtype=torch.long, device=idx.device).unsqueeze(0)
+        else:
+            # Initial forward pass (no cache)
+            pos = torch.arange(0, t, dtype=torch.long, device=idx.device).unsqueeze(0)
 
         tkn_emb = self.tkn_emb(idx)
         pos_emb = self.pos_emb(pos)
         x = self.transformer.drop(tkn_emb+pos_emb)
 
-        updated_kv_caches = [] # list of tuples (k,v) for head of each Block
+        updated_kv_caches = [] # list of tuples (k,v) for each Block
         for i, block in enumerate(self.transformer.h):
             x, updated_kv_cache = block(x, kv_cache=kv_caches[i] if kv_caches is not None else None)
             updated_kv_caches.append(updated_kv_cache)
@@ -228,51 +233,57 @@ class LLM(nn.Module):
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
+            # For generation, we only need logits of the last token
             logits = self.lm_head(x[:, [-1], :])
             loss = None
             
         return logits, loss, updated_kv_caches
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def generate(self, idx:torch.Tensor, max_new_tokens:int, temperature=1.0, top_k=None):
         """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
+        Takes a conditioning sequence of indices idx (LongTensor of shape (b,t)) and
+        completes the sequence max_new_tokens times, feeding the predictions back into the model.
+        It manages the KV cache to ensure the context window (block_size) is respected.
         """
-        kv_caches = None
+        kv_caches = None # Initialize
+        initial_input_length = idx.size(1)
+        
+        if initial_input_length > self.block_size:
+            # Use only the last block_size tokens from the prompt
+            current_input_for_model = idx[:, -self.block_size:]
+        else:
+            current_input_for_model = idx
+        
+        # one forward pass to initialize KV caches.
+        logits, _, kv_caches = self(current_input_for_model, kv_caches=None)
+
+        if initial_input_length > self.block_size:
+            idx = idx[:, -self.block_size:]
+
         for _ in range(max_new_tokens):
-            # If the sequence context is growing too long, crop the KV cache
-            if kv_caches is not None and kv_caches[0][0].shape[-2] >= self.block_size:
-                for i in range(len(kv_caches)):
-                    # Chop the cache to the block size
-                    k, v = kv_caches[i]
-                    # Slice sequence dimension T
-                    kv_caches[i] = (k[..., -self.block_size+1:, :], v[..., -self.block_size+1:, :])
-                # Pass only the last token
-                idx_cond = idx[:, -1:]
-            
-            elif kv_caches is None:
-                # First pass, no cache exists yet, crop the input if it's too long
-                idx_cond = idx if idx.size(1) <= self.block_size else idx[:, -self.block_size:]
-            else:
-                # Subsequent passes, we have a cache, so only pass the last token
-                idx_cond = idx[:, -1:]
+            idx_cond = idx[:, -1:] 
 
             logits, _, kv_caches = self(idx_cond, kv_caches=kv_caches)
-            # --- After the forward pass, prune the cache if it's too long ---
-            if kv_caches[0][0].shape[-2] > self.block_size:
+            
+            # Ensure kv cache doesn't exceed block_size
+            current_cache_length = kv_caches[0][0].shape[-2] 
+            
+            if current_cache_length > self.block_size:
                 for i in range(len(kv_caches)):
-                    k, v = kv_caches[i]
-                    # Slice the sequence dimension (T) to be at most block_size
-                    kv_caches[i] = (k[..., -self.block_size:, :], v[..., -self.block_size:, :])
-
-            logits = logits[:, -1, :] / temperature
+                    k_layer, v_layer = kv_caches[i]
+                    # Slice to keep only the last 'self.block_size' tokens
+                    kv_caches[i] = (k_layer[..., -self.block_size:, :], 
+                                    v_layer[..., -self.block_size:, :])
+                                    
+            logits = logits[:, -1, :] / temperature # (B, vocab_size)
+            
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('inf')
 
             probs = F.softmax(logits, dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1)
-            idx = torch.cat((idx, idx_next), dim=1)
+            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
+            idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
 
         return idx

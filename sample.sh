@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Define default arguments
-MODEL_PATH="7_rope_gqa/rope_llm_model.pt"
-MAX_NEW_TOKENS=512
-START_TEXT="speak"
+MODEL_PATH="5_naive_mhla/mhla_model.pt"
+MAX_NEW_TOKENS=5000
+START_TEXT=""
 DEVICE="cuda"
 TEMPERATURE=1.0
 TOP_K=""  # Leave blank to omit top_k
