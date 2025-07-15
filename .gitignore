@@ -16,3 +16,6 @@ venv/
 *.pth
 # ignore logs
 *.log
+
+# ignore temp excel files
+*$*.xlsx
