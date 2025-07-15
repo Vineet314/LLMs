@@ -3,7 +3,7 @@
 # Define default arguments
 MODEL_PATH="5_naive_mhla/mhla_model.pt"
 MAX_NEW_TOKENS=5000
-START_TEXT=""
+START_TEXT=" "
 DEVICE="cuda"
 TEMPERATURE=1.0
 TOP_K=""  # Leave blank to omit top_k

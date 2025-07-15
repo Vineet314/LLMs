@@ -57,6 +57,7 @@ def main():
     t = time()
     with torch.no_grad():
         generated_ids = model.generate(x, args.max_new_tokens, temperature=args.temperature, top_k=args.top_k)
+    torch.cuda.synchronize()
     dt = time() - t
 
     generated_text = enc.decode(generated_ids[0].tolist())
