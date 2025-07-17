@@ -2,8 +2,6 @@
 This scripts builds upon the Naive MHLA implemetnation by implementing the Rotray Positional Encodings (RoPE)
 The script is implemented as per the DeepSeek's introduction of the Decoupled Rotray Postional Encodings in 
 DeepSeek V2 : https://arxiv.org/abs/2405.04434
-
-THIS IS STILL A WORK IN PROGRESS
 '''
 import math
 import torch
@@ -284,47 +282,39 @@ class LLM(nn.Module):
         return logits, loss, updated_kv_caches
     
     @torch.no_grad()
-    def generate(self, idx:torch.Tensor, max_new_tokens:int, temperature=1.0, top_k=None):
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
         """
-        Takes a conditioning sequence of indices idx (LongTensor of shape (b,t)) and
-        completes the sequence max_new_tokens times, feeding the predictions back into the model.
-        It manages the KV cache to ensure the context window (block_size) is respected.
+        Autoregressive generation of new tokens with sliding window KV cache.
+        Allows for generation longer than the model's block_size.
         """
-        kv_caches = None # Initialize
-        initial_input_length = idx.size(1)
+        self.eval() # Set avoids dropout
+        kv_caches = None
         
-        if initial_input_length > self.block_size:
-            # Use only the last block_size tokens from the prompt
-            current_input_for_model = idx[:, -self.block_size:]
-        else:
-            current_input_for_model = idx
-        
-        # one forward pass to initialize KV caches.
-        logits, _, kv_caches = self(current_input_for_model, kv_caches=None)
-
-        if initial_input_length > self.block_size:
-            idx = idx[:, -self.block_size:]
-
         for _ in range(max_new_tokens):
-            idx_cond = idx[:, -1:] 
+            # Truncate the prompt if it's longer than the block size.
+            if kv_caches is None:
+                idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            else:
+                idx_cond = idx[:, -1:]
 
+            if kv_caches is not None:
+                # Using c_kv as reference for checking seq len.
+                cached_len = kv_caches[0]['c_kv'].shape[1]
+                if cached_len >= self.config.block_size:
+                    keep_len = self.config.block_size - 1
+                    for i in range(len(kv_caches)):
+                        kv_caches[i]['c_kv'] = kv_caches[i]['c_kv'][:, -keep_len:, :]
+                        kv_caches[i]['k_r']  = kv_caches[i]['k_r'][:, :, -keep_len:, :] # k_r cache has sequence length at dim 2
+            
             logits, _, kv_caches = self(idx_cond, kv_caches=kv_caches)
-            
-            # Ensure kv cache doesn't exceed block_size
-            current_cache_length = kv_caches[0][0].shape[-2] 
-            
-            if current_cache_length > self.block_size:
-                for i in range(len(kv_caches)):
-                    kv_caches[i] = kv_caches[i][..., -self.block_size:, :]
-                                    
-            logits = logits[:, -1, :] / temperature # (B, vocab_size)
-            
+            logits = logits[:, -1, :] / temperature
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('inf')
 
             probs = F.softmax(logits, dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
-            idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat((idx, idx_next), dim=1)
 
+        self.train() # back into training you go
         return idx
