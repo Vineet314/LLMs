@@ -150,3 +150,36 @@ class CausalSelfAttention(nn.Module):
         updated_kv_cache = {'c_kv': c_kv, 'k_r': k_r}
 
         return y, updated_kv_cache
+
+class MLP(nn.Module):
+    """ A simple feed-forward network block. """
+    def __init__(self, config: LLMconfig):
+        super().__init__()
+        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
+        self.gelu    = nn.GELU()
+        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
+    
+class Block(nn.Module):
+    """ A single Transformer block combining attention and MLP. """
+    def __init__(self, config: LLMconfig):
+        super().__init__()
+        self.attn = CausalSelfAttention(config)
+        self.mlp  = MLP(config)
+        self.ln1  = nn.LayerNorm(config.n_embd)
+        self.ln2  = nn.LayerNorm(config.n_embd)
+
+    def forward(self, x, freqs_cis, kv_cache=None):
+        # Self-attention with residual connection
+        attn_output, updated_kv_cache = self.attn(self.ln1(x), freqs_cis, kv_cache=kv_cache)
+        x = x + attn_output
+        # Feed-forward network with residual connection
+        x = x + self.mlp(self.ln2(x))
+        return x, updated_kv_cache
