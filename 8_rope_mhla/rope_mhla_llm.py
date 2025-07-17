@@ -118,14 +118,14 @@ class CausalSelfAttention(nn.Module):
 #------------ RoPE--------------
 
         c_kr:torch.Tensor = self.W_kr(x).unsqueeze(2)        # (B,T,1,dhr)
-        k_r = self.config.apply_rotary_emb(c_kr, freqs_cis).transpose(1,2)  # (B,1,T,dhr), to be cached
+        k_r = LLMconfig.apply_rotary_emb(c_kr, freqs_cis).transpose(1,2)  # (B,1,T,dhr), to be cached
 
         # initate KV cache
         if kv_cache is not None:
             k_r = torch.cat([kv_cache['k_r'], k_r], dim=2)
 
         c_qr:torch.Tensor = self.W_qr(c_q).view(B,T,nh,dhr) # (B,T,nh,dhr) # because rope expects (B,T,H,dh)
-        q_r = self.config.apply_rotary_emb(c_qr, freqs_cis).transpose(1,2) # (B,nh,T,dhr)
+        q_r = LLMconfig.apply_rotary_emb(c_qr, freqs_cis).transpose(1,2) # (B,nh,T,dhr)
         
         attn_r = q_r @ k_r.transpose(-1,-2)
 
