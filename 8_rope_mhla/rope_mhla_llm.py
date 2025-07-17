@@ -183,3 +183,148 @@ class Block(nn.Module):
         # Feed-forward network with residual connection
         x = x + self.mlp(self.ln2(x))
         return x, updated_kv_cache
+
+class LLM(nn.Module):
+    """ A simple Large language model """
+    def __init__(self, config:LLMconfig):
+        super().__init__()
+        self.config = config
+
+        self.tkn_emb = nn.Embedding(config.vocab_size, config.n_embd)
+        self.transformer = nn.ModuleDict(dict(
+            drop = nn.Dropout(config.dropout),
+            h    = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f = nn.LayerNorm(config.n_embd)))
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        self.tkn_emb.weight  = self.lm_head.weight # Weight tying
+
+        # Precompute RoPE frequencies
+        self.register_buffer("freqs_cis", self._precompute_freqs_cis())
+        self.apply(self._init_weights)
+    
+    def _precompute_freqs_cis(self):
+        """Precomputes the rotary frequencies for RoPE."""
+        d = self.config.rope_head_dim
+        assert d % 2 == 0, "rope_head_dim must be even"
+        
+        theta = 1.0 / (10000.0 ** (torch.arange(0, d, 2).float() / d)) # 1.0 / (base^(2i/d))
+        seq = torch.arange(self.config.block_size)
+        freqs = torch.outer(seq, theta)
+
+        # Convert to complex numbers: r * e^(i*theta)
+        freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+        return freqs_cis
+    
+    def _init_weights(self, module):
+        """Initializes model weights."""
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def configure_optimizers(self, weight_decay, learning_rate, device, prints=False):
+        # start with all of the candidate parameters (that require grad)
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+        decay_params = [p for p in param_dict.values() if p.dim() >= 2]
+        nodecay_params = [p for p in param_dict.values() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+
+        # Create AdamW optimizer and use the fused version if it is available
+        try:
+            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=True)
+        except:
+            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate)
+        if prints:
+            print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+            print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        return optimizer
+
+    def get_num_params(self):
+        """Return the number of parameters in the model."""
+        n_params = sum(p.numel() for p in self.parameters())
+        return n_params
+
+    def forward(self, idx, targets=None, kv_caches=None):
+        B,T = idx.size()
+        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, max is {self.config.block_size}"
+
+        # Determine start position for RoPE based on cache
+        start_pos = kv_caches[0]['k_r'].shape[2] if kv_caches is not None else 0
+        freqs_cis = self.freqs_cis[start_pos : start_pos + T]
+
+        x = self.transformer.drop(self.tkn_emb(idx))
+
+        updated_kv_caches = []
+        for i, block in enumerate(self.transformer.h):
+            layer_cache = kv_caches[i] if kv_caches is not None else None
+            x, updated_cache = block(x, freqs_cis, kv_cache=layer_cache)
+            updated_kv_caches.append(updated_cache)
+
+        x = self.transformer.ln_f(x)
+
+        if targets is not None:
+            logits = self.lm_head(x)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+        else:
+            # For generation, we only need logits of the last token
+            logits = self.lm_head(x[:, [-1], :])
+            loss = None
+            
+        return logits, loss, updated_kv_caches
+    
+    @torch.no_grad()
+    def generate(self, idx:torch.Tensor, max_new_tokens:int, temperature=1.0, top_k=None):
+        """
+        Takes a conditioning sequence of indices idx (LongTensor of shape (b,t)) and
+        completes the sequence max_new_tokens times, feeding the predictions back into the model.
+        It manages the KV cache to ensure the context window (block_size) is respected.
+        """
+        kv_caches = None # Initialize
+        initial_input_length = idx.size(1)
+        
+        if initial_input_length > self.block_size:
+            # Use only the last block_size tokens from the prompt
+            current_input_for_model = idx[:, -self.block_size:]
+        else:
+            current_input_for_model = idx
+        
+        # one forward pass to initialize KV caches.
+        logits, _, kv_caches = self(current_input_for_model, kv_caches=None)
+
+        if initial_input_length > self.block_size:
+            idx = idx[:, -self.block_size:]
+
+        for _ in range(max_new_tokens):
+            idx_cond = idx[:, -1:] 
+
+            logits, _, kv_caches = self(idx_cond, kv_caches=kv_caches)
+            
+            # Ensure kv cache doesn't exceed block_size
+            current_cache_length = kv_caches[0][0].shape[-2] 
+            
+            if current_cache_length > self.block_size:
+                for i in range(len(kv_caches)):
+                    kv_caches[i] = kv_caches[i][..., -self.block_size:, :]
+                                    
+            logits = logits[:, -1, :] / temperature # (B, vocab_size)
+            
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('inf')
+
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
+            idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
+
+        return idx
