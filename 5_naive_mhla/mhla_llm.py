@@ -140,7 +140,7 @@ class Block(nn.Module):
         return x, updated_kv_cache
 
 class LLM(nn.Module):
-    """ A simple GPT-like language model """
+    """ A simple Large language model """
     def __init__(self, config:LLMconfig):
         super().__init__()
         self.config = config
