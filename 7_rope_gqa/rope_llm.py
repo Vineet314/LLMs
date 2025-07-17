@@ -7,7 +7,6 @@ offering benefits like better generalization to different sequence lengths.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor # type hints
 
 class LLMconfig:
     # hyperparameters
@@ -19,8 +18,10 @@ class LLMconfig:
     n_layer: int
     dropout: float
 
-    def apply_rotary_emb(x:Tensor, freqs_cis:Tensor):
-        # x is either the query or the key whose embeddings are to be rotated two at a time.
+    @staticmethod
+    def apply_rotary_emb(x:torch.Tensor, freqs_cis:torch.Tensor)->torch.Tensor:
+        ''' Applies RoPE to either the query or the key whose embeddings are to be rotated two at a time.'''
+
         # H below is either the number of total query heads(nh) or number of k-v heads (n_kvh)
         # hs is the embedding dimension for the query/key, given by n_embd//nh
         B,T,H,_ = x.size()
@@ -61,7 +62,7 @@ class CausalSelfAttention(nn.Module):
         self.attn_dropout  = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x:Tensor, freqs_cis, kv_cache=None):
+    def forward(self, x:torch.Tensor, freqs_cis, kv_cache=None):
         B, T, C = x.size()
         head_size = C // self.n_head
 
@@ -69,9 +70,9 @@ class CausalSelfAttention(nn.Module):
         kv_proj_size = self.n_kv_heads * head_size
         # q, k, v = self.c_attn(x).split(self.n_embd, dim=2) # this was for MHA
         q, k, v = self.c_attn(x).split([q_proj_size, kv_proj_size, kv_proj_size], dim=2)
-        q:Tensor = q.view(B, T, self.n_head, head_size) # (B, T, nh, hs)
-        k:Tensor = k.view(B, T, self.n_kv_heads, head_size) # (B, T, n_kvh, hs)
-        v:Tensor = v.view(B, T, self.n_kv_heads, head_size).transpose(1, 2) # (B, n_kvh, T, hs)
+        q:torch.Tensor = q.view(B, T, self.n_head, head_size) # (B, T, nh, hs)
+        k:torch.Tensor = k.view(B, T, self.n_kv_heads, head_size) # (B, T, n_kvh, hs)
+        v:torch.Tensor = v.view(B, T, self.n_kv_heads, head_size).transpose(1, 2) # (B, n_kvh, T, hs)
 
         # Apply RoPE
         q = LLMconfig.apply_rotary_emb(q, freqs_cis).transpose(1, 2) # (B, nh, T, hs)
@@ -154,9 +155,9 @@ class LLM(nn.Module):
 
         self.apply(self._init_weights)
 
-    def precompute_freqs_cis(self, seq_len:int, head_size, base=10000.0)->Tensor:
+    def precompute_freqs_cis(self, seq_len:int, head_size, base=10000.0)->torch.Tensor:
         assert head_size % 2 ==0 , "please use even dimension, preferably an exponent of 2"
-        freqs:Tensor = 1.0 / (base ** (torch.arange(0, head_size, 2).float() / head_size)) # size : (head_size//2)
+        freqs:torch.Tensor = 1.0 / (base ** (torch.arange(0, head_size, 2).float() / head_size)) # size : (head_size//2)
         tokens = torch.arange(seq_len, device=freqs.device)                          # size : (seq_len)
         freqs  = torch.outer(tokens, freqs)                                          # size : (seq_len , (head_size//2))
         freqs_cis = torch.polar(torch.ones_like(freqs), freqs)   #complex64          # size : (seq_len , (head_size//2))

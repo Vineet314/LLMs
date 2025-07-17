@@ -36,6 +36,7 @@ class CausalSelfAttention(nn.Module):
         self.W_uk  = nn.Linear(config.kv_latent_dim, config.n_embd,        bias=False)
         self.W_uv  = nn.Linear(config.kv_latent_dim, config.n_embd,        bias=False)
         self.W_o   = nn.Linear(config.n_embd,       config.n_embd,         bias=False)
+        
         # self.ln  = nn.LayerNorm(config.kv_latent_dim)
         self.dropout = nn.Dropout(config.dropout)
 
