@@ -11,8 +11,8 @@ For training on a single GPU, this project firstly aims at understanding the cor
   - `mqa_gqa_llm.py`: KV Caching introduces significant memory bottlenecks. To reduce, we group (duplicate) Keys and Values, reducing computation at the cost of quality.
   - `naive_mhla_llm.py`: Compress KV vectors, way better than GQA, improves training and inference efficiency. Introduced by deepseek in [Deepseek V2](https://arxiv.org/abs/2405.04434). Currently the RoPE less implementation, that's what Naive.
   - `sinusoidal_llm.py` : So far have been using learnable encodings, time to upgrade to sinusoidal, fixed encodings for positions. 
-  - `rope_llm.py` : (TODO) Implement the Rotary Postional Encodings, as per the [RoFormer](https://arxiv.org/pdf/2104.09864v1)
-  - `rope_mhla_llm.py` : (TODO) Implement the Decoupled Rotary Positional Encodings, as in the [DeepSeek V2 ](https://arxiv.org/abs/2405.04434)
+  - `rope_llm.py` : Implements the Rotary Postional Encodings, as per the [RoFormer](https://arxiv.org/pdf/2104.09864v1) on a model with Grouped Query Attention.
+  - `rope_mhla_llm.py` : Implements the Decoupled Rotary Positional Encodings, as in the [DeepSeek V2 ](https://arxiv.org/abs/2405.04434).
   - `flash_mhla_llm.py` : (TODO) Implement the goodiness of Flash Attention, but for Multi Head Latent Attention as per [Flash MLA](https://github.com/deepseek-ai/FlashMLA) by DeepSeek (This probably won't work on Kaggle)
 
 For training on multiple GPUs, check out my repository [Distributed Pytorch](https://github.com/Vineet314/Distributed-Pytorch) which explores distributed training.
