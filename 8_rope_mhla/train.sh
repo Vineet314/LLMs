@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# To run this script, and thus train the model, from root folder run :  LLMs/single_gpu/mqa_gqa_train/train.sh
+# To run this script, and thus train the model, cd 8* and run : ./train.sh
 # Define default arguments
 BATCH_SIZE=8      # 2**3
 BLOCK_SIZE=1024   # 2**10
@@ -11,7 +11,9 @@ DEVICE="cuda"
 EVAL_ITERS=200
 N_EMBD=256
 N_HEAD=8
-N_KV_HEADS=4  
+KV_LATENT_DIM=32
+Q_LATENT_DIM=32
+ROPE_HEAD_DIM=32
 N_LAYER=6   # We need to go deeper
 DROPOUT=0.2
 VOCAB_SIZE=50304
@@ -22,7 +24,7 @@ COMPILE=true
 SAVE_MODEL=true
 
 # Run the training script with arguments
-python rope_train.py \
+python rope_mhla_train.py \
   --batch_size $BATCH_SIZE \
   --block_size $BLOCK_SIZE \
   --max_iters $MAX_ITERS \
@@ -31,7 +33,9 @@ python rope_train.py \
   --eval_iters $EVAL_ITERS \
   --n_embd $N_EMBD \
   --n_head $N_HEAD \
-  --n_kv_heads $N_KV_HEADS \
+  --kv_latent_dim $KV_LATENT_DIM \
+  --q_latent_dim $Q_LATENT_DIM \
+  --rope_head_dim $ROPE_HEAD_DIM \
   --n_layer $N_LAYER \
   --dropout $DROPOUT \
   --vocab_size $VOCAB_SIZE \

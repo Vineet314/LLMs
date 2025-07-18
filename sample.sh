@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define default arguments
-MODEL_PATH="7_rope_gqa/rope_llm_model.pt"
+MODEL_PATH="8_rope_mhla/rope_mhla_llm_model.pt"
 MAX_NEW_TOKENS=5000
 START_TEXT=" "
 DEVICE="cuda"

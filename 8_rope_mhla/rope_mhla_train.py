@@ -66,7 +66,6 @@ TrainingConfig = Trainconfig(
     total_batch_size = 2**13,
     batch_size = 4, # how many independent sequences will we process in parallel?
     max_iters = 500,
-    eval = False,
     eval_interval = 50,
     learning_rate = 3e-4,
     warmup_steps = 25,
