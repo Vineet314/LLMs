@@ -20,7 +20,7 @@ SAVE_MODEL=true
 VOCAB_SIZE=50304
 BLOCK_SIZE=1024                 # sequence length
 N_EMBD=256
-POS_EMB="rope"
+POS_EMB="learn"
 
 UP_DIM=4
 NON_LINEARITY="gelu"
@@ -32,7 +32,7 @@ N_HEAD=8
 # N_KV_HEADS=4
 KV_LATENT_DIM=32
 Q_LATENT_DIM=32
-ROPE_HEAD_DIM=16
+# ROPE_HEAD_DIM=16
 
 # Torchrun settings
 NUM_GPUS=1
@@ -62,7 +62,6 @@ torchrun \
   --n_head $N_HEAD \
   --kv_latent_dim $KV_LATENT_DIM \
   --q_latent_dim $Q_LATENT_DIM \
-  --rope_head_dim $ROPE_HEAD_DIM \
   --n_layer $N_LAYER \
   --dropout $DROPOUT \
   --vocab_size $VOCAB_SIZE \
@@ -70,5 +69,7 @@ torchrun \
   --up_dim $UP_DIM \
   --non_linearity $NON_LINEARITY \
   --typ $ATTN_TYPE \
-  $( [ "$COMPILE" = true ] && echo "--compile" ) \
-  $( [ "$SAVE_MODEL" = true ] && echo "--save_model" )
+  --compile \
+  --save_model
+  # $( [ "$COMPILE" = true ] && echo "--compile" ) \
+  # $( [ "$SAVE_MODEL" = true ] && echo "--save_model" )
