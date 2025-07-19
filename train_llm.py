@@ -674,7 +674,7 @@ grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 model = LLM(ModelConfig).to(device)
 print(f"total parameters = {model.get_num_params():,}")
 
-model = torch.compile(model)
+if TrainingConfig.compile : model = torch.compile(model)
 
 model = DDP(model, device_ids=[ddp_local_rank])
 raw_model:LLM = model.module
@@ -699,7 +699,7 @@ for iter in range(TrainingConfig.max_iters):
         # if iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters - 1:
         #     losses = estimate_loss()
         #     print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-    loss_accum = 0.0 
+    loss_accum = torch.tensor(0.0, device=device)
 
     for micro_step in range(grad_accum_steps):
         # sample a batch of data
@@ -730,4 +730,6 @@ for iter in range(TrainingConfig.max_iters):
     if master_process : print(f"step: {iter} | train loss:{loss_accum.item():.4f} | dt: {dt:.2f}ms")
 
 destroy_process_group()
-torch.save(model, 'llm_model.pt')
+if TrainingConfig.save_model and master_process:
+    torch.save(model.state_dict(), 'ddp_model.pt')
+    torch.save(raw_model.state_dict(), 'llm_model.pt')

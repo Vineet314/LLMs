@@ -1,0 +1,64 @@
+#!/bin/bash
+
+# ------------------ CONFIGURATION ------------------
+
+# Training parameters
+BATCH_SIZE=8                    # microbatch size
+BLOCK_SIZE=1024                 # sequence length
+MAX_ITERS=2500
+LEARNING_RATE=0.0003
+DEVICE="cuda"
+EVAL_ITERS=200
+WARMUP_STEPS=100
+MAX_DECAY_STEPS=300
+TOTAL_BATCH_SIZE_STR="2**13"   # used to calculate grad_accum_steps
+COMPILE=true
+SAVE_MODEL=true
+
+# Model architecture
+N_EMBD=256
+N_HEAD=8
+KV_LATENT_DIM=32
+Q_LATENT_DIM=32
+ROPE_HEAD_DIM=32
+N_LAYER=6
+DROPOUT=0.2
+VOCAB_SIZE=50304
+POS_EMB="rope"
+UP_DIM=4
+NON_LINEARITY="gelu"
+ATTN_TYPE="mla"
+
+# Torchrun settings
+NUM_GPUS=2
+SCRIPT="train_llm.py"         # Make sure this matches your script name
+
+# ------------------ EXECUTION ------------------
+
+torchrun \
+  --standalone \
+  --nproc_per_node=$NUM_GPUS \
+  $SCRIPT \
+  --batch_size $BATCH_SIZE \
+  --block_size $BLOCK_SIZE \
+  --max_iters $MAX_ITERS \
+  --learning_rate $LEARNING_RATE \
+  --device $DEVICE \
+  --eval_iters $EVAL_ITERS \
+  --warmup_steps $WARMUP_STEPS \
+  --max_decay_steps $MAX_DECAY_STEPS \
+  --total_batch_size_str $TOTAL_BATCH_SIZE_STR \
+  --n_embd $N_EMBD \
+  --n_head $N_HEAD \
+  --kv_latent_dim $KV_LATENT_DIM \
+  --q_latent_dim $Q_LATENT_DIM \
+  --rope_head_dim $ROPE_HEAD_DIM \
+  --n_layer $N_LAYER \
+  --dropout $DROPOUT \
+  --vocab_size $VOCAB_SIZE \
+  --pos_emb $POS_EMB \
+  --up_dim $UP_DIM \
+  --non_linearity $NON_LINEARITY \
+  --typ $ATTN_TYPE \
+  $( [ "$COMPILE" = true ] && echo "--compile" ) \
+  $( [ "$SAVE_MODEL" = true ] && echo "--save_model" )
