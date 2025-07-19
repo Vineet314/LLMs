@@ -178,10 +178,10 @@ def main(model:LLM, TrainingConfig:Trainconfig, ModelConfig:LLMconfig, optimizer
                 # print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
                 # t4 = time()
         optimizer.zero_grad(set_to_none=True)
-        loss_accum = 0.0 
+        loss_accum = torch.tensor(0.0, device=TrainingConfig.device)
 
         for micro_step in range(grad_accum_steps):
-            x, y = train_loader.next_batch()
+            x,y = train_loader.next_batch()
             x,y = x.to(device=TrainingConfig.device), y.to(device=TrainingConfig.device)
             # evaluate the loss
             if torch.cuda.is_bf16_supported(): # OPTIM 2 brought dt from 170 to 130

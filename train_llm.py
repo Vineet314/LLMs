@@ -341,6 +341,7 @@ class LLM(nn.Module):
         # Create AdamW optimizer and use the fused version if it is available
         try:
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=True)
+            print("Using Fused AdamW")
         except:
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate)
         if prints:
@@ -476,12 +477,11 @@ class Trainconfig:
     max_iters : int
     eval : bool
     eval_interval : int
+    eval_iters : int
     learning_rate : float
     warmup_steps : int
     max_decay_steps : int
     device : str
-    eval : False
-    eval_iters : int
     compile : bool #= False if os.name != 'posix' else True
     save_model : bool
 
@@ -522,6 +522,7 @@ TrainingConfig = Trainconfig(
 
 device_type = 'cuda'
 dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+print("Using BFloat16")
 ctx = torch.autocast(device_type=device_type, dtype=dtype)
 # ___________ CLI-OVERRIDE__________________
 
@@ -617,8 +618,8 @@ url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshake
 text = requests.get(url).text
 enc = tiktoken.get_encoding('gpt2')
 all_tokens = torch.tensor(enc.encode(text), dtype=torch.long)
-train_dataset = MyDataset(all_tokens, Trainconfig.batch_size, ModelConfig.block_size)
-eval_dataset  = MyDataset(all_tokens, Trainconfig.batch_size, ModelConfig.block_size)
+train_dataset = MyDataset(all_tokens, TrainingConfig.batch_size, ModelConfig.block_size)
+# eval_dataset  = MyDataset(all_tokens, TrainingConfig.batch_size, ModelConfig.block_size)
 
 # ____________ UTIL FUNCTIONS _________________
 
@@ -664,8 +665,8 @@ master_process = ddp_rank == 0
 
 #___________GRAD_ACCUM SETUP_____________
 
-total_batch_size = Trainconfig.total_batch_size
-B = Trainconfig.batch_size    # microbatch size
+total_batch_size = TrainingConfig.total_batch_size
+B = TrainingConfig.batch_size    # microbatch size
 T = ModelConfig.block_size    # sequence length 
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
@@ -690,7 +691,7 @@ scaler = torch.amp.GradScaler(enabled=(device_type == 'cuda'))
 
 for iter in range(TrainingConfig.max_iters):
     t0 = time()
-    lr = get_lr(iter) 
+    lr = get_lr(iter, TrainingConfig) 
     for param_grp in optimizer.param_groups:
         param_grp['lr'] = lr
     if TrainingConfig.eval:
@@ -702,8 +703,6 @@ for iter in range(TrainingConfig.max_iters):
     loss_accum = torch.tensor(0.0, device=device)
 
     for micro_step in range(grad_accum_steps):
-        # sample a batch of data
-        # x, y = train_loader.next_batch()
         x,y = next(train_iter)
         x,y = x.to(device=device), y.to(device=device)
         # sync gradients only on the last micro step
@@ -712,7 +711,7 @@ for iter in range(TrainingConfig.max_iters):
         model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
         # evaluate the loss
         with ctx:
-            logits, loss = model(x,y)
+            _, loss, _ = model(x,y)
             loss = loss/grad_accum_steps
 
         loss_accum += loss.detach()  
