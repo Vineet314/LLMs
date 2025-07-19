@@ -32,7 +32,7 @@ class LLMconfig:
 
     # Neural Network
     up_dim  : int
-    non_lin : str | Literal['relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu']
+    non_lin : str | Literal['elu','lrelu','glu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu']
     dropout : float
     n_layer : int
     
@@ -213,4 +213,48 @@ class Attention(nn.Module):
 
         return y, updated_kv_cache
     
+class MLP(nn.Module):
+    """ A simple feed-forward network block. """
+    def __init__(self, config: LLMconfig):
+        super().__init__()
+        non_linearity_map = {
+            'relu': nn.ReLU(),
+            'gelu': nn.GELU(),
+            'swish': nn.SiLU(),
+            'mish': nn.Mish(),
+            'silu': nn.SiLU(),
+            'selu': nn.SELU(),
+            'celu': nn.CELU(),
+            'elu': nn.ELU(),
+            'lrelu': nn.LeakyReLU(negative_slope=0.01),
+            'glu': nn.GLU(dim=-1)}
+
+        self.c_fc = nn.Linear(config.n_embd, config.up_dim*config.n_embd, bias=False)
+        self.non_lin = non_linearity_map.get(config.non_lin, nn.GELU())
+        self.c_proj = nn.Linear(config.up_dim*config.n_embd, config.n_embd, bias=False)
+        self.dropout = nn.Dropout(config.dropout)
+        
+    def forward(self, x):
+        x = self.c_fc(x)
+        x = self.non_lin(x)
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
+    
+class Block(nn.Module):
+    """ A single Transformer block combining attention and MLP. """
+    def __init__(self, config:LLMconfig):
+        super().__init__()
+        self.attn = Attention(config)
+        self.mlp  = MLP(config)
+        self.ln1  = nn.LayerNorm(config.n_embd)
+        self.ln2  = nn.LayerNorm(config.n_embd)
+
+    def forward(self, x:torch.Tensor, freq_cis:torch.Tensor|None = None, kv_cache=None):
+        # Layer Norm + Attention
+        attn, updated_kv_cache = self.attn.forward(self.ln1(x), freq_cis, kv_cache)
+        x = x + attn
+        # Feed-forward network with residual connection
+        x = x + self.mlp(self.ln2(x))
+        return x, updated_kv_cache
 
