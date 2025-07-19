@@ -20,25 +20,30 @@ SAVE_MODEL=true
 VOCAB_SIZE=50304
 BLOCK_SIZE=1024                 # sequence length
 N_EMBD=256
-POS_EMB="learn"
+POS_EMB="rope"
 
 UP_DIM=4
 NON_LINEARITY="gelu"
 DROPOUT=0.2
 N_LAYER=6
 
-ATTN_TYPE="gqa"
+ATTN_TYPE="mla"
 N_HEAD=8
-N_KV_HEADS=4
-# KV_LATENT_DIM=32
-# Q_LATENT_DIM=32
-# ROPE_HEAD_DIM=32
+# N_KV_HEADS=4
+KV_LATENT_DIM=32
+Q_LATENT_DIM=32
+ROPE_HEAD_DIM=16
 
 # Torchrun settings
 NUM_GPUS=1
 SCRIPT="train_llm.py"         # Make sure this matches your script name
 
 # ------------------ EXECUTION ------------------
+
+  # --kv_latent_dim $KV_LATENT_DIM \
+  # --q_latent_dim $Q_LATENT_DIM \
+  # --rope_head_dim $ROPE_HEAD_DIM \
+  # --n_kv_heads $N_KV_HEADS \
 
 torchrun \
   --standalone \
@@ -55,7 +60,9 @@ torchrun \
   --total_batch_size_str $TOTAL_BATCH_SIZE_STR \
   --n_embd $N_EMBD \
   --n_head $N_HEAD \
-  --n_kv_heads $N_KV_HEADS \
+  --kv_latent_dim $KV_LATENT_DIM \
+  --q_latent_dim $Q_LATENT_DIM \
+  --rope_head_dim $ROPE_HEAD_DIM \
   --n_layer $N_LAYER \
   --dropout $DROPOUT \
   --vocab_size $VOCAB_SIZE \
