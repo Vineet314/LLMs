@@ -10,13 +10,21 @@
     - Learnable PE
     - Sinusoidal PE
     - Rotary PE (RoPE)
-'''
 
+This script uses Pytorch's Distributed Data Parallel, meaning the model can be trained on multi-GPU systems.
+This can be either run using a bash script (recommended) or by using a terminal command as : 
+
+torchrun --standalone --nproc_per_node=2 /path/to/this/scripty.py --arg1=val1 --arg2=val2
+For details about arguments, see the LLMConfig and TrainConfig classes.
+
+'''
+### ----------- Model Script -----------
+
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from math import sqrt,log
 from typing import Literal
 from dataclasses import dataclass 
 
@@ -30,13 +38,13 @@ class LLMconfig:
 
     # Neural Network
     up_dim  : int
-    non_lin : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu']
+    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu']
     dropout : float
     n_layer : int
     
     # Attention
     typ : str | Literal['mha', 'mqa', 'gqa', 'mla', 'fmla']
-    kv_cache : bool
+    # kv_cache : bool
     n_head : int
     n_kv_heads : int 
         # Only for mla 
@@ -187,7 +195,7 @@ class Attention(nn.Module):
             if not rope:
                 q:torch.Tensor = self.W_uq(c_q)
                 q = q.view(B, T, nh, hs).transpose(1, 2)
-                attn:torch.Tensor = (q @ k_eff @ c_kv.transpose(1,2).unsqueeze(1)) / sqrt(hs)
+                attn:torch.Tensor = (q @ k_eff @ c_kv.transpose(1,2).unsqueeze(1)) / math.sqrt(hs)
             else:
                 dhr = self.config.rope_head_dim
                 attn_c = c_q.unsqueeze(1) @ k_eff @ c_kv.transpose(-1,-2).unsqueeze(1)
@@ -203,7 +211,7 @@ class Attention(nn.Module):
                 q_r = LLMconfig.apply_rotary_emb(c_qr, freq_cis).transpose(1,2)
 
                 attn_r = q_r @ k_r.transpose(-1,-2)
-                attn:torch.Tensor = (attn_c + attn_r)/sqrt(hs+dhr)
+                attn:torch.Tensor = (attn_c + attn_r)/math.sqrt(hs+dhr)
 
             query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
             key_indices = torch.arange(T_full, device=x.device).unsqueeze(0)
@@ -232,13 +240,13 @@ class MLP(nn.Module):
             'lrelu': nn.LeakyReLU(negative_slope=0.01)}
 
         self.c_fc = nn.Linear(config.n_embd, config.up_dim*config.n_embd, bias=False)
-        self.non_lin = non_linearity_map.get(config.non_lin, nn.GELU())
+        self.non_linearity = non_linearity_map.get(config.non_linearity, nn.GELU())
         self.c_proj = nn.Linear(config.up_dim*config.n_embd, config.n_embd, bias=False)
         self.dropout = nn.Dropout(config.dropout)
         
     def forward(self, x):
         x = self.c_fc(x)
-        x = self.non_lin(x)
+        x = self.non_linearity(x)
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
@@ -272,7 +280,7 @@ class LLM(nn.Module):
         elif config.pos_emb == 'sin':
             pos_emb  = torch.zeros(config.block_size, config.n_embd)
             position = torch.arange(0, config.block_size, dtype=torch.float).unsqueeze(1)
-            div_term = torch.exp(torch.arange(0, config.n_embd, 2).float() * (-log(10000.0) / config.n_embd))
+            div_term = torch.exp(torch.arange(0, config.n_embd, 2).float() * (-math.log(10000.0) / config.n_embd))
             pos_emb[:, 0::2] = torch.sin(position * div_term)
             pos_emb[:, 1::2] = torch.cos(position * div_term)
             self.register_buffer('pos_emb', pos_emb)
@@ -309,6 +317,11 @@ class LLM(nn.Module):
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def get_num_params(self):
+        """Returns the number of parameters in the model."""
+        n_params = sum(p.numel() for p in self.parameters())
+        return n_params
 
     def configure_optimizers(self, weight_decay, learning_rate, device, prints=False):
         # start with all of the candidate parameters (that require grad)
@@ -437,3 +450,284 @@ class LLM(nn.Module):
 
         self.train()
         return idx
+    
+### ----------- Training Script -----------
+
+import os
+import argparse
+import tiktoken
+import requests
+
+from time import time
+
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group
+from torch.utils.data import IterableDataset, DataLoader
+
+assert torch.cuda.is_available()
+
+# ____________PARAMS-CONFIG_________________
+
+@dataclass
+class Trainconfig:
+    total_batch_size : int
+    batch_size : int
+    max_iters : int
+    eval : bool
+    eval_interval : int
+    learning_rate : float
+    warmup_steps : int
+    max_decay_steps : int
+    device : str
+    eval : False
+    eval_iters : int
+    compile : bool #= False if os.name != 'posix' else True
+    save_model : bool
+
+ModelConfig = LLMconfig(
+    # token params
+    vocab_size = 50304, 
+    block_size = 1024, 
+    n_embd = 768, 
+    pos_emb = 'rope',
+    # FFN
+    up_dim = 4, 
+    non_linearity = 'gelu',  
+    dropout=0.2,
+    n_layer = 12, 
+    # Attention
+    typ = 'mla', 
+    # kv_cache = True, 
+    n_head = 8,
+    n_kv_heads = 4, 
+    # MHLA
+    q_latent_dim = 256, 
+    kv_latent_dim = 256,
+    rope_head_dim = 64)                
+
+TrainingConfig = Trainconfig(
+    total_batch_size = 2**13,
+    batch_size = 4, # how many independent sequences will we process in parallel?
+    max_iters = 500,
+    eval_interval = 50,
+    learning_rate = 3e-4,
+    warmup_steps = 25,
+    max_decay_steps = 75,
+    device = 'cuda' if torch.cuda.is_available() else 'cpu',
+    eval = False,
+    eval_iters = 200,
+    compile = False if os.name != 'posix' else True,
+    save_model = True)
+
+device_type = 'cuda'
+dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+ctx = torch.autocast(device_type=device_type, dtype=dtype)
+# ___________ CLI-OVERRIDE__________________
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Train a simple LLM model')
+    parser.add_argument('--batch_size',    type=int,   default=TrainingConfig.batch_size,    help='Batch size for training')
+    parser.add_argument('--max_iters',     type=int,   default=TrainingConfig.max_iters,     help='Maximum number of iterations for training')
+    parser.add_argument('--eval_interval', type=int,   default=TrainingConfig.eval_interval, help='Interval for evaluation')
+    parser.add_argument('--learning_rate', type=float, default=TrainingConfig.learning_rate, help='Learning rate for training')
+    parser.add_argument('--warmup_steps',  type=int,   default=TrainingConfig.warmup_steps,  help='Number of warmup steps for learning rate')
+    parser.add_argument('--max_decay_steps',type=int,  default=TrainingConfig.max_decay_steps,help='Maximum decay steps for learning rate')
+    parser.add_argument('--device',        type=str,   default=TrainingConfig.device,        help='Device to use for training (cpu or cuda)')
+    parser.add_argument('--eval_iters',    type=int,   default=TrainingConfig.eval_iters,    help='Number of iterations for evaluation')
+
+    parser.add_argument('--vocab_size',  type=int,   default=ModelConfig.vocab_size,  help='Vocabulary size for the model')
+    parser.add_argument('--block_size',  type=int,   default=ModelConfig.block_size,  help='Block size for the model')
+    parser.add_argument('--n_embd',      type=int,   default=ModelConfig.n_embd,      help='Embedding dimension for the model')
+    parser.add_argument('--pos_emb',     type=str,   default=ModelConfig.pos_emb,     help='Type of positional encoding (learn, sin, rope)')
+    parser.add_argument('--up_dim',      type=int,   default=ModelConfig.up_dim,      help='Up dimension for the MLP in the model')
+    parser.add_argument('--non_linearity',type=str,   default=ModelConfig.non_linearity,help='Non-linearity for the MLP in the model')
+    parser.add_argument('--dropout',     type=float, default=ModelConfig.dropout,     help='Dropout rate for the model')
+    parser.add_argument('--n_layer',     type=int,   default=ModelConfig.n_layer,     help='Number of layers in the model')
+    parser.add_argument('--typ',         type=str,   default=ModelConfig.typ,         help='Type of attention mechanism (mha, mqa, gqa, mla, fmla)')
+    parser.add_argument('--n_head',      type=int,   default=ModelConfig.n_head,      help='Number of attention heads in the model')
+    parser.add_argument('--n_kv_heads',  type=int,   default=ModelConfig.n_kv_heads,  help='Number of KV heads in the model (only for gqa)')
+    parser.add_argument('--q_latent_dim',  type=int, default=None,                    help='Query latent dimension (only for mla)')
+    parser.add_argument('--kv_latent_dim', type=int, default=None,                    help='KV latent dimension (only for mla)')
+    parser.add_argument('--rope_head_dim', type=int, default=None,                    help='RoPE head dimension (only for mla)')
+    
+    parser.add_argument('--total_batch_size_str', type=str, default='2**16', help='Total batch size for training passed in as a string expression')
+    parser.add_argument('--compile',    action='store_true', help='Whether to compile the model with torch.compile()')
+    parser.add_argument('--eval',       action='store_true', help='Wheter to perform Evalutions once a while')
+    parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
+
+    return parser.parse_args()
+
+args = parse_args()
+for key, value in vars(args).items():
+    # need to eval the total_batch_size to get the grad_accum_steps
+    if key == 'total_batch_size_str':
+        value = eval(value)
+        setattr(TrainingConfig, 'total_batch_size', value)
+    else:
+        if isinstance(value, str) and key !='non_linearity':
+            value = value.lower().strip()
+        if hasattr(TrainingConfig, key):
+            setattr(TrainingConfig, key, value)
+        else:
+            setattr(ModelConfig, key, value)
+
+if ModelConfig.typ == 'mha':
+    ModelConfig.n_kv_heads = ModelConfig.n_head
+elif ModelConfig.typ == 'mqa':
+    ModelConfig.n_kv_heads = 1
+elif ModelConfig.typ == 'mla':
+    req = ModelConfig.q_latent_dim is not None and ModelConfig.kv_latent_dim is not None
+    assert req, "Either q_latent_dim or kv_latent_dim is missing"
+    if ModelConfig.pos_emb == 'rope':
+        assert ModelConfig.rope_head_dim is not None, "Need dim of Rotary heads"
+
+# _______________ DATASET _________________
+
+class MyDataset(IterableDataset):
+    def __init__(self, tokens, B, T):
+        super().__init__()
+        self.tokens = tokens
+        self.B = B
+        self.T = T
+
+    def __iter__(self):
+        # Get the rank and world size to ensure each GPU gets a unique shard of data
+        worker_info = torch.utils.data.get_worker_info()
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+
+        # Create a shard of the data for the current process
+        num_tokens = len(self.tokens)
+        tokens_per_process = num_tokens // world_size
+        start = rank * tokens_per_process
+        end = start + tokens_per_process
+
+        # This is a simplified sharding. More robust methods exist.
+        data = self.tokens[start:end]
+
+        while True: # Loop indefinitely for epochs
+            # Generate random starting points for batches
+            ix = torch.randint(0, len(data) - self.T, (self.B,))
+            x = torch.stack([data[i:i+self.T] for i in ix])
+            y = torch.stack([data[i+1:i+self.T+1] for i in ix])
+            yield x, y
+
+url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+text = requests.get(url).text
+enc = tiktoken.get_encoding('gpt2')
+all_tokens = torch.tensor(enc.encode(text), dtype=torch.long)
+train_dataset = MyDataset(all_tokens, Trainconfig.batch_size, ModelConfig.block_size)
+eval_dataset  = MyDataset(all_tokens, Trainconfig.batch_size, ModelConfig.block_size)
+
+# ____________ UTIL FUNCTIONS _________________
+
+def get_lr(iter, TrainingConfig:Trainconfig):
+    max_lr = TrainingConfig.learning_rate
+    min_lr = max_lr*0.1
+    # 1) linear warump for warmup_steps:
+    if iter < TrainingConfig.warmup_steps:
+        return max_lr * (iter+1)/TrainingConfig.warmup_steps
+    #2) if iter > lr_decay_iters, return min_lr
+    elif iter > TrainingConfig.max_decay_steps:
+        return min_lr
+    #3) in between, use cosine decay
+    else:
+        decay_ratio = (iter - TrainingConfig.warmup_steps) / (TrainingConfig.max_decay_steps - TrainingConfig.warmup_steps)
+        decay_ratio = min(decay_ratio, 1.0)  # ensure it does
+        coeff = 0.5 * (1 + math.cos(math.pi * decay_ratio))
+        return min_lr + coeff * (max_lr - min_lr)
+
+@torch.no_grad()
+def estimate_loss(model:LLM, TrainingConfig:Trainconfig, eval_loader:DataLoader):
+    out = {}
+    model.eval()
+    for split in ['train', 'val']:
+        losses = torch.zeros(TrainingConfig.eval_iters)
+        for k in range(TrainingConfig.eval_iters):
+            X, Y = eval_loader.next_batch()
+            _, loss, _ = model(X, Y)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
+
+# _______________DDP setup_________________
+
+init_process_group(backend='nccl')
+ddp_rank = int(os.environ['RANK'])
+ddp_local_rank = int(os.environ['LOCAL_RANK'])
+ddp_world_size = int(os.environ['WORLD_SIZE'])
+device = f"cuda:{ddp_local_rank}"
+torch.cuda.set_device(device)
+master_process = ddp_rank == 0
+
+#___________GRAD_ACCUM SETUP_____________
+
+total_batch_size = Trainconfig.total_batch_size
+B = Trainconfig.batch_size    # microbatch size
+T = ModelConfig.block_size    # sequence length 
+assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
+grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
+
+#___________CREATE YOUR MODEL_____________
+model = LLM(ModelConfig).to(device)
+print(f"total parameters = {model.get_num_params():,}")
+
+model = torch.compile(model)
+
+model = DDP(model, device_ids=[ddp_local_rank])
+raw_model:LLM = model.module
+
+#______________________________________________ TRAINING ______________________________________________
+
+optimizer = raw_model.configure_optimizers(weight_decay=0.1,learning_rate=3e-4,device=device,prints=False)
+train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2, pin_memory=True)
+# eval_loader = DataLoader(eval_dataset, batch_size=None, num_workers=2, pin_memory=True) 
+train_iter = iter(train_loader)
+
+scaler = torch.amp.GradScaler(enabled=(device_type == 'cuda'))
+
+for iter in range(TrainingConfig.max_iters):
+    t0 = time()
+    lr = get_lr(iter) 
+    for param_grp in optimizer.param_groups:
+        param_grp['lr'] = lr
+    if TrainingConfig.eval:
+        pass
+        # every once in a while evaluate the loss on train and val sets
+        # if iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters - 1:
+        #     losses = estimate_loss()
+        #     print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+    loss_accum = 0.0 
+
+    for micro_step in range(grad_accum_steps):
+        # sample a batch of data
+        # x, y = train_loader.next_batch()
+        x,y = next(train_iter)
+        x,y = x.to(device=device), y.to(device=device)
+        # sync gradients only on the last micro step
+        # this is to avoid unnecessary synchronization overhead as we are accumulating gradients
+        # this is a hack to avoid the DDP warning about gradient synchronization
+        model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
+        # evaluate the loss
+        with ctx:
+            logits, loss = model(x,y)
+            loss = loss/grad_accum_steps
+
+        loss_accum += loss.detach()  
+        scaler.scale(loss).backward()
+
+    dist.all_reduce(loss_accum, op=dist.ReduceOp.SUM)
+    # grad clipping
+    scaler.unscale_(optimizer)
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    scaler.step(optimizer)
+    scaler.update()    
+    optimizer.zero_grad(set_to_none=True)
+    torch.cuda.synchronize()
+    dt = (time()-t0)*1000
+    if master_process : print(f"step: {iter} | train loss:{loss_accum.item():.4f} | dt: {dt:.2f}ms")
+
+destroy_process_group()
+torch.save(model, 'llm_model.pt')
