@@ -465,31 +465,28 @@ class LLM(nn.Module):
 
         if kv_caches is not None and kv_caches[0] is not None:
             if self.config.typ in ('mha', 'mqa', 'gqa'):
-                # cache is (key, value) tensors: (B, n_kv_heads, T_cache, hs)
                 start_pos = kv_caches[0][0].shape[-2]
             elif self.config.typ == 'mla':
                 if self.config.pos_emb == 'rope':
-                    # Cache is {'c_kv': (B, T_cache, nlkv), 'k_r': (B, 1, T_cache, dhr)}
                     start_pos = kv_caches[0]['c_kv'].shape[1]
                 else:
-                    # Cache is the c_kv tensor: (B, T_cache, nlkv)
                     start_pos = kv_caches[0].shape[1]
 
         tkn_emb = self.tkn_emb(idx)  # Shape: (B, T, n_embd)
         
+        x = tkn_emb # Default value for x
         freqs_cis = None
-        
-        pos = torch.arange(start_pos, start_pos + T, dtype=torch.long, device=idx.device)
-        pos = pos.clamp(max=self.config.block_size - 1)
 
         if self.config.pos_emb == 'rope':
-            freqs_cis = self.freqs_cis.to(idx.device)[pos]
-            x = tkn_emb
+            freqs_cis = self.freqs_cis[start_pos : start_pos + T]
+        
         elif self.config.pos_emb == 'learn':
-            pos_emb = self.pos_emb(pos)
-            x = tkn_emb + pos_emb
+            pos = torch.arange(start_pos, start_pos + T, dtype=torch.long, device=idx.device)
+            x = tkn_emb + self.pos_emb(pos)
+
         elif self.config.pos_emb == 'sin':
-            x = tkn_emb + self.pos_emb.to(idx.device)[pos, :]
+            pos = torch.arange(start_pos, start_pos + T, dtype=torch.long, device=idx.device)
+            x = tkn_emb + self.pos_emb[pos]
 
         x = self.transformer.drop(x)
 
@@ -507,7 +504,6 @@ class LLM(nn.Module):
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
-            # For generation, we only need logits of the last token
             logits = self.lm_head(x[:, [-1], :])
             loss = None
 
