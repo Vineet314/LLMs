@@ -53,7 +53,7 @@ class CausalSelfAttention(nn.Module):
         # output of size (batch, time-step, head size)
         B,T,C = x.size()
         head_size = C //self.n_head
-        # Calculate Q, K, V bt projecting input x
+        # Calculate Q, K, V by projecting input x
         q_proj_size = self.n_embd
         kv_proj_size = self.n_kv_heads * head_size
         # q, k, v = self.c_attn(x).split(self.n_embd, dim=2) # this was for MHA

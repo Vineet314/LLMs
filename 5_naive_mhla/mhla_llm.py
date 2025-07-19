@@ -35,7 +35,7 @@ class CausalSelfAttention(nn.Module):
         self.W_dkv = nn.Linear(config.n_embd,        config.kv_latent_dim, bias=False)
         self.W_uk  = nn.Linear(config.kv_latent_dim, config.n_embd,        bias=False)
         self.W_uv  = nn.Linear(config.kv_latent_dim, config.n_embd,        bias=False)
-        self.W_o   = nn.Linear(config.n_embd,       config.n_embd,         bias=False)
+        self.W_o   = nn.Linear(config.n_embd,        config.n_embd,        bias=False)
         
         # self.ln  = nn.LayerNorm(config.kv_latent_dim)
         self.dropout = nn.Dropout(config.dropout)
@@ -77,6 +77,8 @@ class CausalSelfAttention(nn.Module):
             c_kv = new_c_kv # (B,T,n_kvl) ; initiate cache
         else:
             c_kv = torch.cat([kv_cache, new_c_kv], dim=1) # append cache
+        
+        updated_kv_cache = c_kv
 
         T_full = c_kv.size(1) # Current total sequence length (including cache)
 
@@ -92,11 +94,11 @@ class CausalSelfAttention(nn.Module):
         # T is the length of the current input `x`. T_full is `T_prev_cache + T`.
         # For a new query at relative index `i` (0 to T-1), its global index is `(T_full - T) + i`.
         # It can attend to keys up to its global index.
-        query_global_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
-        key_global_indices   = torch.arange(T_full, device=x.device).unsqueeze(0)
-        causal_mask_expanded = (query_global_indices >= key_global_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
-
-        attn = attn.masked_fill(causal_mask_expanded == 0, float('-inf'))
+        query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
+        key_indices   = torch.arange(T_full, device=x.device).unsqueeze(0)
+        mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
+        attn = attn.masked_fill(mask == 0, float('-inf'))
+        
         attn = self.dropout(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
 
         # final output : attn @ C_kv @ v_abs 
@@ -104,7 +106,7 @@ class CausalSelfAttention(nn.Module):
         y:torch.Tensor = attn @ c_kv.unsqueeze(1) @ v_eff #(B, nh, T, hs)
         y = self.dropout(y.transpose(1,2).contiguous().view(B,T,C))
 
-        return y, c_kv
+        return y, updated_kv_cache
        
 class MLP(nn.Module):
     """ a simple linear layer followed by a non-linearity """

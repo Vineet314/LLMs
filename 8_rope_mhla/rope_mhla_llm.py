@@ -57,10 +57,10 @@ class CausalSelfAttention(nn.Module):
         
         # (NoPE)
         self.head_size = config.n_embd // config.n_head
+        self.W_uq  = nn.Linear(config.q_latent_dim , config.n_embd, False)
         self.W_dkv = nn.Linear(config.n_embd, config.kv_latent_dim, False)
         self.W_uk  = nn.Linear(config.kv_latent_dim, config.n_embd, False)
         self.W_uv  = nn.Linear(config.kv_latent_dim, config.n_embd, False)
-        self.W_uq  = nn.Linear(config.q_latent_dim , config.n_embd, False)
 
         # (RoPE)
         self.W_qr  = nn.Linear(config.q_latent_dim, config.n_head * config.rope_head_dim,  False)
