@@ -12,8 +12,7 @@
     - Rotary PE (RoPE)
 
 This script uses Pytorch's Distributed Data Parallel, meaning the model can be trained on multi-GPU systems.
-This can be either run using a bash script (recommended) or by using a terminal command as : 
-
+For instance, on kaggle, add this as a utility script, and run:
 torchrun --standalone --nproc_per_node=2 /path/to/this/scripty.py --arg1=val1 --arg2=val2
 For details about arguments, see the LLMConfig and TrainConfig classes.
 
