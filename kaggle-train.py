@@ -13,7 +13,7 @@
 
 This script uses Pytorch's Distributed Data Parallel, meaning the model can be trained on multi-GPU systems.
 For instance, on kaggle, add this as a utility script, and run:
-torchrun --standalone --nproc_per_node=2 /path/to/this/scripty.py --arg1=val1 --arg2=val2
+!torchrun --standalone --nproc_per_node=2 /path/to/this/scripty.py --arg1=val1 --arg2=val2
 For details about arguments, see the LLMConfig and TrainConfig classes.
 
 '''
@@ -432,7 +432,7 @@ class LLM(nn.Module):
         n_params = sum(p.numel() for p in self.parameters())
         return n_params
 
-    def configure_optimizers(self, weight_decay, learning_rate, device, prints=False):
+    def configure_optimizers(self, weight_decay, learning_rate, device):
         # start with all of the candidate parameters (that require grad)
         param_dict = {pn: p for pn, p in self.named_parameters()}
         param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
@@ -442,20 +442,14 @@ class LLM(nn.Module):
         nodecay_params = [p for p in param_dict.values() if p.dim() < 2]
         optim_groups = [
             {'params': decay_params, 'weight_decay': weight_decay},
-            {'params': nodecay_params, 'weight_decay': 0.0}
-        ]
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+            {'params': nodecay_params, 'weight_decay': 0.0}]
 
         # Create AdamW optimizer and use the fused version if it is available
         try:
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=True)
-            print("Using Fused AdamW")
+            # print("Using Fused AdamW")
         except:
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate)
-        if prints:
-            print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-            print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
         return optimizer
 
     def forward(self, idx: torch.Tensor, targets=None, kv_caches=None):
@@ -599,14 +593,14 @@ class Trainconfig:
 ModelConfig = LLMconfig(
     # token params
     vocab_size = 50304, 
-    block_size = 1024, 
+    block_size = 2**10, 
     n_embd = 256, 
     pos_emb = 'rope',
     # FFN
     up_dim = 4, 
     non_linearity = 'gelu',  
     dropout=0.2,
-    n_layer = 12, 
+    n_layer = 6, 
     # Attention
     typ = 'mla', 
     # kv_cache = True, 
@@ -654,9 +648,9 @@ def parse_args():
     parser.add_argument('--typ',         type=str,   default=ModelConfig.typ,         help='Type of attention mechanism (mha, mqa, gqa, mla, fmla)')
     parser.add_argument('--n_head',      type=int,   default=ModelConfig.n_head,      help='Number of attention heads in the model')
     parser.add_argument('--n_kv_heads',  type=int,   default=ModelConfig.n_kv_heads,  help='Number of KV heads in the model (only for gqa)')
-    parser.add_argument('--q_latent_dim',  type=int, default=None,                    help='Query latent dimension (only for mla)')
-    parser.add_argument('--kv_latent_dim', type=int, default=None,                    help='KV latent dimension (only for mla)')
-    parser.add_argument('--rope_head_dim', type=int, default=None,                    help='RoPE head dimension (only for mla)')
+    parser.add_argument('--q_latent_dim',  type=int, default=ModelConfig.q_latent_dim,help='Query latent dimension (only for mla)')
+    parser.add_argument('--kv_latent_dim', type=int, default=ModelConfig.kv_latent_dim,help='KV latent dimension (only for mla)')
+    parser.add_argument('--rope_head_dim', type=int, default=ModelConfig.rope_head_dim,help='RoPE head dimension (only for mla)')
     
     parser.add_argument('--total_batch_size_str', type=str, default='2**14', help='Total batch size for training passed in as a string expression')
     parser.add_argument('--compile',    action='store_true', help='Whether to compile the model with torch.compile()')
@@ -702,7 +696,7 @@ class DataLoader:
         url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
         text = requests.get(url).text
         tokens = enc.encode(text)
-        self.tokens = torch.tensor(tokens, dtype=torch.int16)
+        self.tokens = torch.tensor(tokens, dtype=torch.long)
 
         self.current_position = self.B* self.T * self.proc_rank
     
@@ -760,7 +754,7 @@ ddp_world_size = int(os.environ['WORLD_SIZE'])
 device = f"cuda:{ddp_local_rank}"
 torch.cuda.set_device(device)
 master_process = ddp_rank == 0
-print(f"DDP_WORLD_SIZE = {ddp_world_size}")
+if master_process : print(f"DDP_WORLD_SIZE = {ddp_world_size}")
 
 #___________GRAD_ACCUM SETUP_____________
 
@@ -772,18 +766,18 @@ grad_accum_steps = total_batch_size // (B * T *ddp_world_size)
 
 #___________CREATE YOUR MODEL_____________
 model = LLM(ModelConfig).to(device)
-print(f"total parameters = {model.get_num_params():,}")
+if master_process : print(f"total parameters = {model.get_num_params():,}")
 model = DDP(model, device_ids=[ddp_local_rank])
 
 if TrainingConfig.compile :  
-    print("Using compiled model")
+    if master_process : print("Using compiled model")
     model = torch.compile(model)
 
 raw_model:LLM = model.module
 
 #______________________________________________ TRAINING ______________________________________________
 
-optimizer = raw_model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device,prints=False)
+optimizer = raw_model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
 train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, process_rank=ddp_rank, num_proc=ddp_world_size)
 eval_loader  = None
 
