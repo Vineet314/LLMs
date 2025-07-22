@@ -85,7 +85,7 @@ class DataLoader:
         with open('../_data/shakesphere.txt', 'r', encoding='utf-8') as f:
             text = f.read()
         tokens = enc.encode(text)
-        self.tokens = torch.tensor(tokens)
+        self.tokens = torch.tensor(tokens, dtype=torch.long)
 
         self.current_position = 0
     
