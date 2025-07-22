@@ -567,12 +567,19 @@ import requests
 
 from time import time
 
-import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
-from torch.utils.data import IterableDataset, DataLoader
 
 assert torch.cuda.is_available()
+
+# ______________DEVICE and DTYPE SETUP_________________
+torch.manual_seed(1729)
+torch.cuda.manual_seed(1729)
+torch.set_float32_matmul_precision('high')
+
+dtype = 'bfloat16' if torch.cuda.is_bf16_supported() else 'float16'
+ctx = torch.amp.autocast(device_type="cuda", dtype=getattr(torch, dtype))
+scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # ____________PARAMS-CONFIG_________________
 
@@ -586,8 +593,7 @@ class Trainconfig:
     eval_iters : int
     learning_rate : float
     warmup_steps : int
-    max_decay_steps : int
-    device : str
+    grad_clip : int
     compile : bool #= False if os.name != 'posix' else True
     save_model : bool
 
@@ -615,22 +621,17 @@ ModelConfig = LLMconfig(
 TrainingConfig = Trainconfig(
     
     total_batch_size = 2**13,
-    batch_size = 4, # how many independent sequences will we process in parallel?
-    max_iters = 500,
-    eval_interval = 50,
-    learning_rate = 3e-4,
-    warmup_steps = 25,
-    max_decay_steps = 75,
-    device = 'cuda' if torch.cuda.is_available() else 'cpu',
+    batch_size = 2**3, # how many independent sequences will we process in parallel?
+    max_iters = 2500,
     eval = False,
-    eval_iters = 200,
-    compile = False if os.name != 'posix' else True,
+    eval_interval=100,
+    eval_iters=100,
+    learning_rate = 3e-4,
+    warmup_steps = 100,
+    grad_clip = 1.0,    
+    compile = True,
     save_model = True)
 
-device_type = 'cuda'
-dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-print("Using BFloat16")
-ctx = torch.autocast(device_type=device_type, dtype=dtype)
 # ___________ CLI-OVERRIDE__________________
 
 def parse_args():
@@ -638,11 +639,10 @@ def parse_args():
     parser.add_argument('--batch_size',    type=int,   default=TrainingConfig.batch_size,    help='Batch size for training')
     parser.add_argument('--max_iters',     type=int,   default=TrainingConfig.max_iters,     help='Maximum number of iterations for training')
     parser.add_argument('--eval_interval', type=int,   default=TrainingConfig.eval_interval, help='Interval for evaluation')
+    parser.add_argument('--eval_iters',    type=int,   default=TrainingConfig.eval_iters,    help='Number of iterations for evaluation')
     parser.add_argument('--learning_rate', type=float, default=TrainingConfig.learning_rate, help='Learning rate for training')
     parser.add_argument('--warmup_steps',  type=int,   default=TrainingConfig.warmup_steps,  help='Number of warmup steps for learning rate')
-    parser.add_argument('--max_decay_steps',type=int,  default=TrainingConfig.max_decay_steps,help='Maximum decay steps for learning rate')
-    parser.add_argument('--device',        type=str,   default=TrainingConfig.device,        help='Device to use for training (cpu or cuda)')
-    parser.add_argument('--eval_iters',    type=int,   default=TrainingConfig.eval_iters,    help='Number of iterations for evaluation')
+    parser.add_argument('--grad_clip',     type=float,  default=TrainingConfig.grad_clip,    help='Gradient Clip value')
 
     parser.add_argument('--vocab_size',  type=int,   default=ModelConfig.vocab_size,  help='Vocabulary size for the model')
     parser.add_argument('--block_size',  type=int,   default=ModelConfig.block_size,  help='Block size for the model')
@@ -659,7 +659,7 @@ def parse_args():
     parser.add_argument('--kv_latent_dim', type=int, default=None,                    help='KV latent dimension (only for mla)')
     parser.add_argument('--rope_head_dim', type=int, default=None,                    help='RoPE head dimension (only for mla)')
     
-    parser.add_argument('--total_batch_size_str', type=str, default='2**16', help='Total batch size for training passed in as a string expression')
+    parser.add_argument('--total_batch_size_str', type=str, default='2**14', help='Total batch size for training passed in as a string expression')
     parser.add_argument('--compile',    action='store_true', help='Whether to compile the model with torch.compile()')
     parser.add_argument('--eval',       action='store_true', help='Wheter to perform Evalutions once a while')
     parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
@@ -691,56 +691,49 @@ elif ModelConfig.typ == 'mla':
 
 # _______________ DATASET _________________
 
-class MyDataset(IterableDataset):
-    def __init__(self, tokens, B, T):
-        super().__init__()
-        self.tokens = tokens
+class DataLoader:
+    def __init__(self, B, T, process_rank, num_proc):
         self.B = B
         self.T = T
+        self.proc_rank = process_rank
+        self.num_proc  = num_proc
 
-    def __iter__(self):
-        # Get the rank and world size to ensure each GPU gets a unique shard of data
-        worker_info = torch.utils.data.get_worker_info()
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        enc = tiktoken.get_encoding('gpt2')
+        # training data
+        url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+        text = requests.get(url).text
+        tokens = enc.encode(text)
+        self.tokens = torch.tensor(tokens, dtype=torch.int16)
 
-        # Create a shard of the data for the current process
-        num_tokens = len(self.tokens)
-        tokens_per_process = num_tokens // world_size
-        start = rank * tokens_per_process
-        end = start + tokens_per_process
+        self.current_position = self.B* self.T * self.proc_rank
+    
+    def next_batch(self):
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_position: self.current_position+(B*T+1)]
+        x = (buf[:-1]).view(B,T)
+        y = (buf[1:]).view(B,T)
+        # advance the position
+        self.current_position += B*T*self.num_proc
 
-        # This is a simplified sharding. More robust methods exist.
-        data = self.tokens[start:end]
-
-        while True: # Loop indefinitely for epochs
-            # Generate random starting points for batches
-            ix = torch.randint(0, len(data) - self.T, (self.B,))
-            x = torch.stack([data[i:i+self.T] for i in ix])
-            y = torch.stack([data[i+1:i+self.T+1] for i in ix])
-            yield x, y
-
-url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-text = requests.get(url).text
-enc = tiktoken.get_encoding('gpt2')
-all_tokens = torch.tensor(enc.encode(text), dtype=torch.long)
-train_dataset = MyDataset(all_tokens, TrainingConfig.batch_size, ModelConfig.block_size)
-# eval_dataset  = MyDataset(all_tokens, TrainingConfig.batch_size, ModelConfig.block_size)
+        if self.current_position + (B*T*self.num_proc+1)  > len(self.tokens):
+            self.current_position = B*T*self.proc_rank
+        return x,y
 
 # ____________ UTIL FUNCTIONS _________________
 
 def get_lr(iter, TrainingConfig:Trainconfig):
     max_lr = TrainingConfig.learning_rate
     min_lr = max_lr*0.1
+    max_decay_steps = TrainingConfig.max_iters
     # 1) linear warump for warmup_steps:
     if iter < TrainingConfig.warmup_steps:
         return max_lr * (iter+1)/TrainingConfig.warmup_steps
     #2) if iter > lr_decay_iters, return min_lr
-    elif iter > TrainingConfig.max_decay_steps:
+    elif iter > max_decay_steps:
         return min_lr
     #3) in between, use cosine decay
     else:
-        decay_ratio = (iter - TrainingConfig.warmup_steps) / (TrainingConfig.max_decay_steps - TrainingConfig.warmup_steps)
+        decay_ratio = (iter - TrainingConfig.warmup_steps) / (max_decay_steps - TrainingConfig.warmup_steps)
         decay_ratio = min(decay_ratio, 1.0)  # ensure it does
         coeff = 0.5 * (1 + math.cos(math.pi * decay_ratio))
         return min_lr + coeff * (max_lr - min_lr)
@@ -768,73 +761,70 @@ ddp_world_size = int(os.environ['WORLD_SIZE'])
 device = f"cuda:{ddp_local_rank}"
 torch.cuda.set_device(device)
 master_process = ddp_rank == 0
+print(f"DDP_WORLD_SIZE = {ddp_world_size}")
 
 #___________GRAD_ACCUM SETUP_____________
 
 total_batch_size = TrainingConfig.total_batch_size
 B = TrainingConfig.batch_size    # microbatch size
-T = ModelConfig.block_size       # sequence length 
-assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
-grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
+T = ModelConfig.block_size       # sequence length
+assert total_batch_size % (B * T *ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
+grad_accum_steps = total_batch_size // (B * T *ddp_world_size)
 
 #___________CREATE YOUR MODEL_____________
 model = LLM(ModelConfig).to(device)
 print(f"total parameters = {model.get_num_params():,}")
+model = DDP(model, device_ids=[ddp_local_rank])
 
 if TrainingConfig.compile :  
     print("Using compiled model")
     model = torch.compile(model)
 
-model = DDP(model, device_ids=[ddp_local_rank])
 raw_model:LLM = model.module
 
 #______________________________________________ TRAINING ______________________________________________
 
-optimizer = raw_model.configure_optimizers(weight_decay=0.1,learning_rate=3e-4,device=device,prints=False)
-train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2, pin_memory=True)
-# eval_loader = DataLoader(eval_dataset, batch_size=None, num_workers=2, pin_memory=True) 
-train_iter = iter(train_loader)
+optimizer = raw_model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device,prints=False)
+train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, process_rank=ddp_rank, num_proc=ddp_world_size)
+eval_loader  = None
 
-scaler = torch.amp.GradScaler(enabled=(device_type == 'cuda'))
-
-for iter in range(TrainingConfig.max_iters):
+for iter in range(TrainingConfig.max_iters+1):
     t0 = time()
+
     lr = get_lr(iter, TrainingConfig) 
     for param_grp in optimizer.param_groups:
         param_grp['lr'] = lr
+    
+    optimizer.zero_grad(set_to_none=True)
     if TrainingConfig.eval:
         pass
         # every once in a while evaluate the loss on train and val sets
         # if iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters - 1:
         #     losses = estimate_loss()
         #     print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-    loss_accum = torch.tensor(0.0, device=device)
 
     for micro_step in range(grad_accum_steps):
-        x,y = next(train_iter)
-        x,y = x.to(device=device), y.to(device=device)
-        # sync gradients only on the last micro step
-        # this is to avoid unnecessary synchronization overhead as we are accumulating gradients
-        # this is a hack to avoid the DDP warning about gradient synchronization
         model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
-        # evaluate the loss
+        x,y = train_loader.next_batch()
+        x,y = x.to(device=device), y.to(device=device)
+
         with ctx:
             _, loss, _ = model(x,y)
             loss = loss/grad_accum_steps
 
-        loss_accum += loss.detach()  
         scaler.scale(loss).backward()
 
-    dist.all_reduce(loss_accum, op=dist.ReduceOp.SUM)
-    # grad clipping
-    scaler.unscale_(optimizer)
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    if TrainingConfig.grad_clip != 0.0:
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), TrainingConfig.grad_clip)
+
     scaler.step(optimizer)
     scaler.update()    
-    optimizer.zero_grad(set_to_none=True)
-    torch.cuda.synchronize()
-    dt = (time()-t0)*1000
-    if master_process : print(f"step: {iter} | train loss:{loss_accum.item():.4f} | dt: {dt:.2f}ms")
+
+    if master_process:
+        torch.cuda.synchronize()
+        dt  = (time()-t0)*1000
+        print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms")
 
 destroy_process_group()
 if TrainingConfig.save_model and master_process:
