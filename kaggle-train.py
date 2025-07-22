@@ -1,22 +1,28 @@
-'''This script builds and trains an LLM model based on the user's CLI inputs. Available settings to choose from : 
+'''This script builds and trains an LLM model based on the user's CLI inputs. 
+
+Credits:
+   - This code is highly inspired by Andrej Karpathy's work on his nanoGPT : https://github.com/karpathy/nanoGPT/
+   - Thanks to Vizuara AI Labs for detailed explanation of Multi Head Latent Attention Algorithm : https://youtu.be/m1x8vA_Tscc
+
+Available settings to choose from : 
 1. Attention Type (with  KV caching): 
-    - Multi Head Attention (mha)
-    - Multi Query Attention (mqa)
-    - Grouped Query Attention (gqa)
-    - Multi Head Latent Attention (mla)
-    - (Work in progress) Flash Multi Head Latent Attention (fmla)
+   - Multi Head Attention (mha)
+   - Multi Query Attention (mqa)
+   - Grouped Query Attention (gqa)
+   - Multi Head Latent Attention (mla)
+   - (Work in progress) Flash Multi Head Latent Attention (fmla)
 
 2. Positional Encodings:
-    - Learnable PE
-    - Sinusoidal PE
-    - Rotary PE (RoPE)
+   - Learnable PE
+   - Sinusoidal PE
+   - Rotary PE (RoPE)
 
 This script uses Pytorch's Distributed Data Parallel, meaning the model can be trained on multi-GPU systems.
 For instance, on kaggle, add this as a utility script, and run:
-!torchrun --standalone --nproc_per_node=2 /path/to/this/scripty.py --arg1=val1 --arg2=val2
-For details about arguments, see the LLMConfig and TrainConfig classes.
 
-'''
+!torchrun --standalone --nproc_per_node=2 /path/to/this/scripty.py --arg1=val1 --arg2=val2
+
+For details about arguments, see the LLMConfig and TrainConfig classes.'''
 ### ----------- Model Script -----------
 
 import math
@@ -568,7 +574,7 @@ assert torch.cuda.is_available()
 # ______________DEVICE and DTYPE SETUP_________________
 torch.manual_seed(1729)
 torch.cuda.manual_seed(1729)
-torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision('high')   # Not sure if this has any effect when used with Auto Mixed Precision
 
 dtype = 'bfloat16' if torch.cuda.is_bf16_supported() else 'float16'
 ctx = torch.amp.autocast(device_type="cuda", dtype=getattr(torch, dtype))
