@@ -1,3 +1,15 @@
+'''This script trains an LLM model based on the user's CLI inputs. 
+
+This code is highly inspired by Andrej Karpathy's work on his nanoGPT : https://github.com/karpathy/nanoGPT/
+
+This script is made to be run on a single GPU(preferred)/CPU. For a more sophisticated run involving distributed systems,
+checkout : https://github.com/Vineet314/Distributed-Pytorch/
+
+To run this, either use a bash script, or run:
+python train.py --arg1=val1 --arg2=val2 ...
+
+For details about arguments, see the LLMConfig and TrainConfig classes.'''
+
 import warnings ; warnings.filterwarnings("ignore")
 import math
 import torch
