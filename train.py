@@ -6,7 +6,7 @@ This script is made to be run on a single GPU(preferred)/CPU. For a more sophist
 checkout : https://github.com/Vineet314/Distributed-Pytorch/
 
 To run this, either use a bash script, or run:
-python train.py --compile --max_iters=100 --typ='gqa' --pos_emb='sin' 
+python train.py --compile --max_iters=100 --typ='gqa' --pos_emb='sin'
 
 For details about arguments, see the LLMConfig and TrainConfig classes.'''
 
@@ -128,7 +128,7 @@ def parse_args():
     parser.add_argument('--non_linearity',type=str,   default=ModelConfig.non_linearity,help='Non-linearity for the MLP in the model')
     parser.add_argument('--dropout',     type=float, default=ModelConfig.dropout,     help='Dropout rate for the model')
     parser.add_argument('--n_layer',     type=int,   default=ModelConfig.n_layer,     help='Number of layers in the model')
-    parser.add_argument('--typ',         type=str,   default=ModelConfig.typ,         help='Type of attention mechanism (mha, mqa, gqa, mla, fmla)')
+    parser.add_argument('--typ',         type=str,   default=ModelConfig.typ,         help='Type of attention mechanism (mha, mqa, gqa, mla)')
     parser.add_argument('--n_head',      type=int,   default=ModelConfig.n_head,      help='Number of attention heads in the model')
     parser.add_argument('--n_kv_heads',  type=int,   default=ModelConfig.n_kv_heads,  help='Number of KV heads in the model (only for gqa)')
     parser.add_argument('--q_latent_dim',  type=int, default=ModelConfig.q_latent_dim,help='Query latent dimension (only for mla)')
@@ -269,7 +269,7 @@ for iter in range(TrainingConfig.max_iters+1):
         x,y = x.to(device=device), y.to(device=device)
 
         with ctx:
-            _, loss, _ = model(x,y)
+            _, loss, _ = model(x,y) #logits, loss, kv cache
             loss = loss/grad_accum_steps
 
         scaler.scale(loss).backward()
