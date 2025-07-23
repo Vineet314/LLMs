@@ -61,7 +61,7 @@ class LLMconfig:
         x_re, x_im = x_.unbind(-1)                      # (B, T, H, hs//2, 2) -> (B, T, H, hs//2)       -> splits those two pairs
         freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(2) # (T, hs//2)          -> (1, T, 1, hs//2)       -> this has dtype complex64, so last dim has two parts, real and imaginary
         # freqs_cis has two parts : real and imaginary (cosθ, sinθ)
-        
+        # import code ; code.interact(local=locals())
         # Perform the rotation (vector * rotation matrix)
         x_re_out = x_re*freqs_cis.real - x_im*freqs_cis.imag    # (B, T, H, hs//2) * (1, T, 1, hs//2) - (B, T, H, hs//2) * (1, T, 1, hs//2) -> (B, T, H, hs//2)
         x_im_out = x_re*freqs_cis.imag + x_im*freqs_cis.real    # (B, T, H, hs//2) * (1, T, 1, hs//2) + (B, T, H, hs//2) * (1, T, 1, hs//2) -> (B, T, H, hs//2)
@@ -122,7 +122,7 @@ class GQA(nn.Module):
             k = k.repeat_interleave(num_repeats, dim=1)
             v = v.repeat_interleave(num_repeats, dim=1)
 
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.config.dropout if self.training else 0, is_causal=True)
         y = y.transpose(1,2).contiguous().view(B,T,C)
 
         # output projection
@@ -381,7 +381,7 @@ class LLM(nn.Module):
     def __init__(self, config:LLMconfig):
         super().__init__()
         self.config = config
-
+        self.head_size = config.n_embd//config.n_head
         self.tkn_emb = nn.Embedding(config.vocab_size, config.n_embd)
         if config.pos_emb == 'learn':
             self.pos_emb = nn.Embedding(config.block_size, config.n_embd)
@@ -406,8 +406,8 @@ class LLM(nn.Module):
 
     def _precompute_freqs_cis(self):
         """Precomputes the rotary frequencies for RoPE."""
-        d = self.config.rope_head_dim
-        assert d % 2 == 0, "rope_head_dim must be even"
+        d = self.config.rope_head_dim if self.config.typ=='mla' else self.head_size
+        assert d % 2 == 0, "head dimension must be even"
         
         theta = 1.0 / (10000.0 ** (torch.arange(0, d, 2).float() / d)) # 1.0 / (base^(2i/d))
         seq = torch.arange(self.config.block_size)

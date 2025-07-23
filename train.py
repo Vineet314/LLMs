@@ -6,7 +6,7 @@ This script is made to be run on a single GPU(preferred)/CPU. For a more sophist
 checkout : https://github.com/Vineet314/Distributed-Pytorch/
 
 To run this, either use a bash script, or run:
-python train.py --arg1=val1 --arg2=val2 ...
+python train.py --compile --max_iters=100 --typ='gqa' --pos_emb='sin' 
 
 For details about arguments, see the LLMConfig and TrainConfig classes.'''
 
@@ -198,7 +198,7 @@ class DataLoader:
 def get_lr(iter, TrainingConfig:Trainconfig):
     max_lr = TrainingConfig.learning_rate
     min_lr = max_lr*0.1
-    max_decay_steps = TrainingConfig.max_iters
+    max_decay_steps = TrainingConfig.max_iters + 2 # avoid division by zero
     # 1) linear warump for warmup_steps:
     if iter < TrainingConfig.warmup_steps:
         return max_lr * (iter+1)/TrainingConfig.warmup_steps
