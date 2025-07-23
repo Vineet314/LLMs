@@ -1,5 +1,33 @@
-## Large Language Model (LLM) 
+# Large Language Model (LLM) 
 
+Build a custom LLM, and then train it. for now, training is done on Tiny Shakespeare data, as we are limited to a single GPU
+
+## Quickstart
+On a Windows Laptop with a CPU you can run:
+```powershell
+python train.py 
+```
+Or a slightly complex one:
+```powershell
+python train.py --max_iters=5000 --eval --save_model --typ='gqa' --pos_emb='rope' --n_head=16 --n_kv_heads=4
+<#
+Attention Mechanisms : --typ : 'mha','mqa','gqa','mla'
+Positional Encodings : --pos_emb : 'learn','sin','rope'
+#> 
+```
+It is highly suggest to run it on a Linux-based OS, like Ubuntu, or on WSL as it enables you to use the Pytorch compiler. 
+Check out `train.sh` if you want to make any changes in settings and run:
+```bash
+chmod +x train.sh
+./train.sh
+# Or you can also change settings directly in CLI:
+# python train.py \
+# --compile --eval --save_model \
+# --typ='mla' --pos_emb='rope' \
+# --max_iters=5000
+```
+
+## Architectures
 This repository contains examples and scripts for training Large Language Models (LLMs) using PyTorch.
 It includes various implementations of LLMs, focusing on understanding the architecture and training techniques.
 The project is structured to progressively build up from basic concepts to more advanced techniques.
@@ -15,4 +43,5 @@ For training on a single GPU, this project firstly aims at understanding the cor
   - `rope_mhla_llm.py` : Implements the Decoupled Rotary Positional Encodings, as in the [DeepSeek V2 ](https://arxiv.org/abs/2405.04434).
   - `flash_mhla_llm.py` : (TODO) Implement the goodiness of Flash Attention, but for Multi Head Latent Attention as per [Flash MLA](https://github.com/deepseek-ai/FlashMLA) by DeepSeek (This probably won't work on Kaggle)
 
+## Multi GPU training
 For training on multiple GPUs, check out my repository [Distributed Pytorch](https://github.com/Vineet314/Distributed-Pytorch) which explores distributed training.

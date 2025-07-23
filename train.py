@@ -15,6 +15,7 @@ import math
 import torch
 import argparse
 import tiktoken
+import requests
 
 from time import time
 from typing import Literal
@@ -174,8 +175,8 @@ class DataLoader:
 
         enc = tiktoken.get_encoding('gpt2')
         # training data
-        with open('_data/shakesphere.txt', 'r', encoding='utf-8') as f:
-            text = f.read()
+        url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+        text = requests.get(url).text
         tokens = enc.encode(text)
         self.tokens = torch.tensor(tokens, dtype=torch.long)
 
