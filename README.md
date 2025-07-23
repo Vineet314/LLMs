@@ -9,9 +9,9 @@ python train.py
 ```
 Or a slightly complex one:
 ```powershell
-python train.py --max_iters=5000 --eval --save_model --typ='gqa' --pos_emb='rope' --n_head=16 --n_kv_heads=4
+python train.py --max_iters=5000 --eval --save_model --attn='gqa' --pos_emb='rope' --n_head=16 --n_kv_heads=4
 <#
-Attention Mechanisms : --typ : 'mha','mqa','gqa','mla'
+Attention Mechanisms : --attn : 'mha','mqa','gqa','mla'
 Positional Encodings : --pos_emb : 'learn','sin','rope'
 #> 
 ```
@@ -23,7 +23,7 @@ chmod +x train.sh
 # Or you can also change settings directly in CLI:
 # python train.py \
 # --compile --eval --save_model \
-# --typ='mla' --pos_emb='rope' \
+# --attn='mla' --pos_emb='rope' \
 # --max_iters=5000
 ```
 

@@ -6,7 +6,7 @@ This script is made to be run on a single GPU(preferred)/CPU. For a more sophist
 checkout : https://github.com/Vineet314/Distributed-Pytorch/
 
 To run this, either use a bash script, or run:
-python train.py --compile --max_iters=100 --typ='gqa' --pos_emb='sin'
+python train.py --compile --max_iters=100 --attn='gqa' --pos_emb='sin'
 
 For details about arguments, see the LLMConfig and TrainConfig classes.'''
 
@@ -65,7 +65,7 @@ class LLMconfig:
     n_layer : int
     
     # Attention
-    typ : str | Literal['mha', 'mqa', 'gqa', 'mla', 'fmla']
+    attn : str | Literal['mha', 'mqa', 'gqa', 'mla', 'fmla']
     # kv_cache : bool
     n_head : int
     n_kv_heads : int 
@@ -86,7 +86,7 @@ ModelConfig = LLMconfig(
     dropout=0.2,
     n_layer = 6, 
     # Attention
-    typ = 'mla', 
+    attn = 'mla', 
     # kv_cache = True, 
     n_head = 8,
     n_kv_heads = 4, 
@@ -129,7 +129,7 @@ def parse_args():
     parser.add_argument('--non_linearity',type=str,   default=ModelConfig.non_linearity,help='Non-linearity for the MLP in the model')
     parser.add_argument('--dropout',     type=float, default=ModelConfig.dropout,     help='Dropout rate for the model')
     parser.add_argument('--n_layer',     type=int,   default=ModelConfig.n_layer,     help='Number of layers in the model')
-    parser.add_argument('--typ',         type=str,   default=ModelConfig.typ,         help='Type of attention mechanism (mha, mqa, gqa, mla)')
+    parser.add_argument('--attn',        type=str,   default=ModelConfig.attn,         help='Type of attention mechanism (mha, mqa, gqa, mla)')
     parser.add_argument('--n_head',      type=int,   default=ModelConfig.n_head,      help='Number of attention heads in the model')
     parser.add_argument('--n_kv_heads',  type=int,   default=ModelConfig.n_kv_heads,  help='Number of KV heads in the model (only for gqa)')
     parser.add_argument('--q_latent_dim',  type=int, default=ModelConfig.q_latent_dim,help='Query latent dimension (only for mla)')
@@ -156,11 +156,11 @@ for key, value in vars(args).items():
             setattr(TrainingConfig, key, value)
         else:
             setattr(ModelConfig, key, value)
-if ModelConfig.typ == 'mha':
+if ModelConfig.attn == 'mha':
     ModelConfig.n_kv_heads = ModelConfig.n_head
-elif ModelConfig.typ == 'mqa':
+elif ModelConfig.attn == 'mqa':
     ModelConfig.n_kv_heads = 1
-elif ModelConfig.typ == 'mla':
+elif ModelConfig.attn == 'mla':
     req = ModelConfig.q_latent_dim is not None and ModelConfig.kv_latent_dim is not None
     assert req, "Either q_latent_dim or kv_latent_dim is missing"
     if ModelConfig.pos_emb == 'rope':
