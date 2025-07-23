@@ -257,7 +257,7 @@ class FullMHLA(nn.Module):
         
         c_q:torch.Tensor = self.W_dq(x)  # (B,T,nlq)
 
-#------------ NoPE--------------
+ #------------ NoPE--------------
 
         # Define the absorbed matrices
         if self.training:
@@ -280,7 +280,7 @@ class FullMHLA(nn.Module):
 
         attn_c = c_q.unsqueeze(1) @ k_eff @ c_kv.transpose(-1,-2).unsqueeze(1)
 
-#------------ RoPE--------------
+ #------------ RoPE--------------
 
         c_kr:torch.Tensor = self.W_kr(x).unsqueeze(2)        # (B,T,1,dhr)
         k_r = LLMconfig.apply_rotary_emb(c_kr, freqs_cis).transpose(1,2)  # (B,1,T,dhr), to be cached
@@ -294,7 +294,7 @@ class FullMHLA(nn.Module):
         
         attn_r = q_r @ k_r.transpose(-1,-2)
 
-#------------ Out--------------
+ #------------ Out--------------
 
         attn = (attn_c + attn_r)/math.sqrt(hs+dhr)
 
