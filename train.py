@@ -26,7 +26,7 @@ from model import LLM
 # ______________DEVICE and DTYPE SETUP_________________
 torch.manual_seed(1729)
 torch.cuda.manual_seed(1729)
-torch.set_float32_matmul_precision('high')   # Not sure if this has any effect when used with Auto Mixed Precision
+torch.set_float32_matmul_precision('medium')   # Not sure if this has any effect when used with Auto Mixed Precision
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
@@ -135,7 +135,7 @@ def parse_args():
     parser.add_argument('--kv_latent_dim', type=int, default=ModelConfig.kv_latent_dim,help='KV latent dimension (only for mla)')
     parser.add_argument('--rope_head_dim', type=int, default=ModelConfig.rope_head_dim,help='RoPE head dimension (only for mla)')
     
-    parser.add_argument('--total_batch_size_str', type=str, default='2**14', help='Total batch size for training passed in as a string expression')
+    parser.add_argument('--total_batch_size_str', type=str, default='2**13', help='Total batch size for training passed in as a string expression')
     parser.add_argument('--compile',    action='store_true', help='Whether to compile the model with torch.compile()')
     parser.add_argument('--eval',       action='store_true', help='Wheter to perform Evalutions once a while')
     parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
@@ -283,7 +283,7 @@ for iter in range(TrainingConfig.max_iters+1):
 
     if "cuda" in device : torch.cuda.synchronize()
     dt  = (time()-t0)*1000
-    print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms")
+    print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps}")
 
 if TrainingConfig.save_model:
     torch.save(model.state_dict(), 'llm_model.pt')

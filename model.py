@@ -105,10 +105,10 @@ class GQA(nn.Module):
 
         if self.config.pos_emb == 'rope':
         # Apply RoPE
-            q = LLMconfig.apply_rotary_emb(q, freqs_cis) # (B, nh, T, hs)
-            k = LLMconfig.apply_rotary_emb(k, freqs_cis) # (B, n_kvh, T, hs)
+            q = LLMconfig.apply_rotary_emb(q, freqs_cis)
+            k = LLMconfig.apply_rotary_emb(k, freqs_cis)
 
-        q,k = q.transpose(1, 2), k.transpose(1, 2)
+        q,k = q.transpose(1, 2), k.transpose(1, 2) # (B, nh, T, hs) # (B, n_kvh, T, hs)
 
         if kv_cache is not None:
             past_k, past_v = kv_cache
