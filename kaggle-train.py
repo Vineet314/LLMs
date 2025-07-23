@@ -18,11 +18,13 @@ Available settings to choose from :
    - Rotary PE (RoPE)
 
 This script uses Pytorch's Distributed Data Parallel, meaning the model can be trained on multi-GPU systems.
-For instance, on kaggle, add this as a utility script, and run:
-
-!torchrun --standalone --nproc_per_node=2 /path/to/this/scripty.py --type='mla' --pos_emb='rope' --max_iters=200
+On kaggle code, add this as a utility script first, then import it in a Jupyter Notebook.
+Ensure the internet is turned on, and you have 2xGPUs selected as hardware accelerator. 
+Then run:
+!torchrun --standalone --nproc_per_node=2 /path/to/this/scripty.py --attn='mla' --pos_emb='rope' --max_iters=200
 
 For details about arguments, see the LLMConfig and TrainConfig classes.'''
+
 ### ----------- Model Script -----------
 import warnings; warnings.filterwarnings('ignore')
 import math
@@ -48,7 +50,7 @@ class LLMconfig:
     n_layer : int
     
     # Attention
-    typ : str | Literal['mha', 'mqa', 'gqa', 'mla', 'fmla']
+    attn : str | Literal['mha', 'mqa', 'gqa', 'mla', 'fmla']
     # kv_cache : bool
     n_head : int
     n_kv_heads : int 
@@ -84,8 +86,8 @@ class GQA(nn.Module):
     def __init__(self, config:LLMconfig):
         super().__init__()
         assert config.n_embd % config.n_head == 0, "n_embd must be divisible by n_head"
-        if config.typ == 'mha' : config.n_kv_heads = config.n_head
-        elif config.typ == 'mqa' : config.n_kv_heads = 1
+        if config.attn == 'mha' : config.n_kv_heads = config.n_head
+        elif config.attn == 'mqa' : config.n_kv_heads = 1
         else : assert config.n_head % config.n_kv_heads == 0, "n_head must be divisible by n_kv_heads"
         
         self.n_kv_heads = config.n_kv_heads
@@ -332,10 +334,10 @@ class Attention(nn.Module):
     def __init__(self, config:LLMconfig):
         super().__init__()
         self.config = config
-        if config.typ in ('mha','mqa','gqa'):
+        if config.attn in ('mha','mqa','gqa'):
             self.attn = GQA(config)
         
-        elif config.typ == 'mla':
+        elif config.attn == 'mla':
             if config.pos_emb != 'rope':
                 self.attn = NaiveMHLA(config)
             else:
@@ -418,7 +420,7 @@ class LLM(nn.Module):
 
     def _precompute_freqs_cis(self):
         """Precomputes the rotary frequencies for RoPE."""
-        d = self.config.rope_head_dim if self.config.typ=='mla' else self.head_size
+        d = self.config.rope_head_dim if self.config.attn=='mla' else self.head_size
         assert d % 2 == 0, "head dimension must be even"
         
         theta = 1.0 / (10000.0 ** (torch.arange(0, d, 2).float() / d)) # 1.0 / (base^(2i/d))
@@ -468,9 +470,9 @@ class LLM(nn.Module):
         start_pos = 0
 
         if kv_caches is not None and kv_caches[0] is not None:
-            if self.config.typ in ('mha', 'mqa', 'gqa'):
+            if self.config.attn in ('mha', 'mqa', 'gqa'):
                 start_pos = kv_caches[0][0].shape[-2]
-            elif self.config.typ == 'mla':
+            elif self.config.attn == 'mla':
                 if self.config.pos_emb == 'rope':
                     start_pos = kv_caches[0]['c_kv'].shape[1]
                 else:
@@ -526,9 +528,9 @@ class LLM(nn.Module):
                 input_for_forward = idx[:, -1:]
 
             if kv_caches[0] is not None:
-                if self.config.typ in ('mha', 'mqa', 'gqa'):
+                if self.config.attn in ('mha', 'mqa', 'gqa'):
                     cache_len = kv_caches[0][0].shape[-2]
-                elif self.config.typ == 'mla':
+                elif self.config.attn == 'mla':
                      cache_len = kv_caches[0]['c_kv'].shape[1] if self.config.pos_emb == 'rope' else kv_caches[0].shape[1]
 
                 if cache_len >= self.config.block_size:
@@ -536,10 +538,10 @@ class LLM(nn.Module):
                     keep_len = self.config.block_size - 1
                     for layer_idx in range(self.config.n_layer):
                         layer_cache = kv_caches[layer_idx]
-                        if self.config.typ in ('mha', 'mqa', 'gqa'):
+                        if self.config.attn in ('mha', 'mqa', 'gqa'):
                             k, v = layer_cache
                             kv_caches[layer_idx] = (k[..., -keep_len:, :], v[..., -keep_len:, :])
-                        elif self.config.typ == 'mla':
+                        elif self.config.attn == 'mla':
                             if self.config.pos_emb == 'rope':
                                 layer_cache['c_kv'] = layer_cache['c_kv'][:, -keep_len:, :]
                                 layer_cache['k_r']  = layer_cache['k_r'][:, :, -keep_len:, :] # Seq len is dim 2
@@ -613,7 +615,7 @@ ModelConfig = LLMconfig(
     dropout=0.2,
     n_layer = 6, 
     # Attention
-    typ = 'mla', 
+    attn = 'mla', 
     # kv_cache = True, 
     n_head = 8,
     n_kv_heads = 4, 
@@ -657,7 +659,7 @@ def parse_args():
     parser.add_argument('--non_linearity',type=str,   default=ModelConfig.non_linearity,help='Non-linearity for the MLP in the model')
     parser.add_argument('--dropout',     type=float, default=ModelConfig.dropout,     help='Dropout rate for the model')
     parser.add_argument('--n_layer',     type=int,   default=ModelConfig.n_layer,     help='Number of layers in the model')
-    parser.add_argument('--typ',         type=str,   default=ModelConfig.typ,         help='Type of attention mechanism (mha, mqa, gqa, mla, fmla)')
+    parser.add_argument('--attn',         type=str,   default=ModelConfig.attn,         help='Type of attention mechanism (mha, mqa, gqa, mla, fmla)')
     parser.add_argument('--n_head',      type=int,   default=ModelConfig.n_head,      help='Number of attention heads in the model')
     parser.add_argument('--n_kv_heads',  type=int,   default=ModelConfig.n_kv_heads,  help='Number of KV heads in the model (only for gqa)')
     parser.add_argument('--q_latent_dim',  type=int, default=ModelConfig.q_latent_dim,help='Query latent dimension (only for mla)')
@@ -683,11 +685,11 @@ for key, value in vars(args).items():
             setattr(TrainingConfig, key, value)
         else:
             setattr(ModelConfig, key, value)
-if ModelConfig.typ == 'mha':
+if ModelConfig.attn == 'mha':
     ModelConfig.n_kv_heads = ModelConfig.n_head
-elif ModelConfig.typ == 'mqa':
+elif ModelConfig.attn == 'mqa':
     ModelConfig.n_kv_heads = 1
-elif ModelConfig.typ == 'mla':
+elif ModelConfig.attn == 'mla':
     req = ModelConfig.q_latent_dim is not None and ModelConfig.kv_latent_dim is not None
     assert req, "Either q_latent_dim or kv_latent_dim is missing"
     if ModelConfig.pos_emb == 'rope':
