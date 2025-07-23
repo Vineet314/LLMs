@@ -5,9 +5,9 @@ Build a custom LLM, and then train it. for now, training is done on Tiny Shakesp
 ## Quickstart
 On a Windows Laptop with a CPU you can run:
 ```powershell
-python train.py 
+python train.py --attn='mqa' --pos_emb='sin'
 ```
-Or a slightly complex one:
+Or a slightly complex one, if you have a GPU:
 ```powershell
 python train.py --max_iters=5000 --eval --save_model --attn='gqa' --pos_emb='rope' --n_head=16 --n_kv_heads=4
 <#
@@ -45,3 +45,8 @@ For training on a single GPU, this project firstly aims at understanding the cor
 
 ## Multi GPU training
 For training on multiple GPUs, check out my repository [Distributed Pytorch](https://github.com/Vineet314/Distributed-Pytorch) which explores distributed training.
+For a try, one can run the `kaggle-train.py` script as per the instructions given in the docstring. Or, it can be run on a single-node multi-gpu server as follows: 
+```bash
+torchrun --standalone --nproc_per_node=8 train.py --max_iters=5000
+# compile is enabled by default
+```
