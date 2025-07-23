@@ -3,7 +3,7 @@
 This code is highly inspired by Andrej Karpathy's work on his nanoGPT : https://github.com/karpathy/nanoGPT/
 
 This script is made to be run on a single GPU(preferred)/CPU. For a more sophisticated run involving distributed systems,
-checkout : https://github.com/Vineet314/Distributed-Pytorch/
+checkout : https://github.com/Vineet314/Distributed-Pytorch/LLMs/kaggle-train-v2.py
 
 To run this, either use a bash script, or run:
 python train.py --compile --max_iters=100 --typ='gqa' --pos_emb='sin'
