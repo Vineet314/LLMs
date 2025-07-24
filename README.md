@@ -5,11 +5,11 @@ Build a custom LLM, and then train it. for now, training is done on Tiny Shakesp
 ## Quickstart
 On a Windows Laptop with a CPU you can run:
 ```powershell
-python train.py --attn='mqa' --pos_emb='sin'
+PS C:\> python train.py --attn='mqa' --pos_emb='sin'
 ```
 Or a slightly complex one, if you have a GPU:
 ```powershell
-python train.py --max_iters=5000 --eval --save_model --attn='gqa' --pos_emb='rope' --n_head=16 --n_kv_heads=4
+PS C:\> python train.py --max_iters=5000 --eval --save_model --attn='gqa' --pos_emb='rope' --n_head=16 --n_kv_heads=4
 <#
 Attention Mechanisms : --attn : 'mha','mqa','gqa','mla'
 Positional Encodings : --pos_emb : 'learn','sin','rope'
@@ -18,8 +18,8 @@ Positional Encodings : --pos_emb : 'learn','sin','rope'
 It is highly suggest to run it on a Linux-based OS, like Ubuntu, or on WSL as it enables you to use the Pytorch compiler. 
 Check out `train.sh` if you want to make any changes in settings and run:
 ```bash
-chmod +x train.sh
-./train.sh
+~$ chmod +x train.sh
+~$ ./train.sh
 # Or you can also change settings directly in CLI:
 # python train.py \
 # --compile --eval --save_model \
