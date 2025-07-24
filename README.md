@@ -1,4 +1,4 @@
-# Large Language Model (LLM) 
+# Large Language Models (LLMs) 
 
 Build a custom LLM, and then train it. for now, training is done on Tiny Shakespeare data, as we are limited to a single GPU
 
