@@ -1,46 +1,62 @@
 #!/bin/bash
 
-# To run this script, and thus train the model, cd 8* and run : ./train.sh
-# Define default arguments
-BATCH_SIZE=8      # 2**3
-BLOCK_SIZE=1024   # 2**10
-MAX_ITERS=3000
-# EVAL_INTERVAL=100 # might add an eval param later 
-LEARNING_RATE=0.0003
-EVAL_ITERS=200
-EVAL=false
-N_EMBD=256
-N_HEAD=8
-KV_LATENT_DIM=32
-Q_LATENT_DIM=32
-ROPE_HEAD_DIM=16
-N_LAYER=6   # We need to go deeper
-DROPOUT=0.2
-VOCAB_SIZE=50304
-WARMUP_STEPS=100
-MAX_DECAY_STEPS=300
-TOTAL_BATCH_SIZE_STR="2**13" # so our grad_accum steps are 1 -> 2**13/(2**3*2**10) (good luck reading that)
-COMPILE=true
-SAVE_MODEL=true
+# This script runs the train.py Python script with specified command-line arguments.
 
-# Run the training script with arguments
-python rope_mhla_train.py \
-  --batch_size $BATCH_SIZE \
-  --block_size $BLOCK_SIZE \
-  --max_iters $MAX_ITERS \
-  --learning_rate $LEARNING_RATE \
-  --device $DEVICE \
-  --eval_iters $EVAL_ITERS \
-  --n_embd $N_EMBD \
-  --n_head $N_HEAD \
-  --kv_latent_dim $KV_LATENT_DIM \
-  --q_latent_dim $Q_LATENT_DIM \
-  --rope_head_dim $ROPE_HEAD_DIM \
-  --n_layer $N_LAYER \
-  --dropout $DROPOUT \
-  --vocab_size $VOCAB_SIZE \
-  --warmup_steps $WARMUP_STEPS \
-  --max_decay_steps $MAX_DECAY_STEPS \
-  --total_batch_size_str $TOTAL_BATCH_SIZE_STR \
-  $( [ "$COMPILE" = true ] && echo "--compile" ) \
-  $( [ "$SAVE_MODEL" = true ] && echo "--save_model" )
+# --- Training Configuration Arguments ---
+BATCH_SIZE=16
+MAX_ITERS=3000
+EVAL_INTERVAL=100
+EVAL_ITERS=20
+LEARNING_RATE=3e-4
+WARMUP_STEPS=100
+GRAD_CLIP=1.0
+
+# --- Model Configuration Arguments ---
+VOCAB_SIZE=50304
+BLOCK_SIZE=1024
+N_EMBD=768
+POS_EMB="sin" # Can be 'learn', 'sin', 'rope'
+UP_DIM=3072
+NON_LINEARITY="gelu" # Example: 'relu', 'gelu', 'silu'
+DROPOUT=0.1
+N_LAYER=8
+ATTN="mla" # Can be 'mha', 'mqa', 'gqa', 'mla'
+N_HEAD=12
+N_KV_HEADS=4 # Only relevant if ATTN is 'gqa'
+Q_LATENT_DIM=128 # Only relevant if ATTN is 'mla'
+KV_LATENT_DIM=128 # Only relevant if ATTN is 'mla'
+ROPE_HEAD_DIM=64 # Only relevant if POS_EMB is 'rope'
+
+# --- Other Arguments ---
+TOTAL_BATCH_SIZE_STR="2**13"
+COMPILE_MODEL="--compile" # Use "--compile" to enable torch.compile()
+PERFORM_EVAL="--no-eval" # Use "--no-eval" to disable evaluations
+SAVE_MODEL="--save_model" # Use "--no-save_model" to disable model saving
+
+# Construct the command
+python train.py \
+    --batch_size $BATCH_SIZE \
+    --max_iters $MAX_ITERS \
+    --eval_interval $EVAL_INTERVAL \
+    --eval_iters $EVAL_ITERS \
+    --learning_rate $LEARNING_RATE \
+    --warmup_steps $WARMUP_STEPS \
+    --grad_clip $GRAD_CLIP \
+    --vocab_size $VOCAB_SIZE \
+    --block_size $BLOCK_SIZE \
+    --n_embd $N_EMBD \
+    --pos_emb $POS_EMB \
+    --up_dim $UP_DIM \
+    --non_linearity $NON_LINEARITY \
+    --dropout $DROPOUT \
+    --n_layer $N_LAYER \
+    --attn $ATTN \
+    --n_head $N_HEAD \
+    --n_kv_heads $N_KV_HEADS \
+    --q_latent_dim $Q_LATENT_DIM \
+    --kv_latent_dim $KV_LATENT_DIM \
+    --rope_head_dim $ROPE_HEAD_DIM \
+    --total_batch_size_str $TOTAL_BATCH_SIZE_STR \
+    ${COMPILE_MODEL} \
+    ${PERFORM_EVAL} \
+    ${SAVE_MODEL}
