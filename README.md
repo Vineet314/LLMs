@@ -50,3 +50,10 @@ For a try, one can run the `kaggle-train.py` script as per the instructions give
 torchrun --standalone --nproc_per_node=8 train.py --max_iters=5000
 # compile is enabled by default
 ```
+## TODO
+- Explore and implement MoE architectures
+- Implement Flash MLA as per [deepseek-ai/FlashMLA](https://github.com/deepseek-ai/FlashMLA)
+- Add ALiBi Positional encodings
+- Fix the eval in training script
+- Add a sample.py and bash script
+- (Much Later) Explore fine tuning
