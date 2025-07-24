@@ -347,9 +347,9 @@ class MLP(nn.Module):
             'elu': nn.ELU(),
             'lrelu': nn.LeakyReLU(negative_slope=0.01)}
 
-        self.c_fc = nn.Linear(config.n_embd, config.up_dim*config.n_embd, bias=False)
+        self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
         self.non_linearity = non_linearity_map.get(config.non_linearity, nn.GELU())
-        self.c_proj = nn.Linear(config.up_dim*config.n_embd, config.n_embd, bias=False)
+        self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
         self.dropout = nn.Dropout(config.dropout)
         
     def forward(self, x):

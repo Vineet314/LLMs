@@ -81,7 +81,7 @@ ModelConfig = LLMconfig(
     n_embd = 256, 
     pos_emb = 'rope',
     # FFN
-    up_dim = 4, 
+    up_dim = 1024, 
     non_linearity = 'gelu',  
     dropout=0.2,
     n_layer = 6, 
