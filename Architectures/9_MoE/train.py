@@ -63,6 +63,9 @@ class LLMconfig:
     non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu']
     dropout : float
     n_layer : int
+    n_exp : int
+    n_act : int
+    coeff : int
     
     # Attention
     attn : str | Literal['mha', 'mqa', 'gqa', 'mla', 'fmla']
@@ -80,11 +83,14 @@ ModelConfig = LLMconfig(
     block_size = 2**10, 
     n_embd = 256, 
     pos_emb = 'rope',
-    # FFN
-    up_dim = 1024, 
+    # MoE
+    up_dim = 768, 
     non_linearity = 'gelu',  
     dropout=0.2,
-    n_layer = 6, 
+    n_layer = 6,
+    n_exp = 8,
+    n_act = 2,
+    coeff = 0.05,
     # Attention
     attn = 'mla', 
     # kv_cache = True, 
@@ -93,7 +99,7 @@ ModelConfig = LLMconfig(
     # MHLA
     q_latent_dim = 32, 
     kv_latent_dim = 32,
-    rope_head_dim = 16)                
+    rope_head_dim = 16)
 
 TrainingConfig = Trainconfig(
     
@@ -125,8 +131,11 @@ def parse_args():
     parser.add_argument('--block_size',  type=int,   default=ModelConfig.block_size,  help='Block size for the model')
     parser.add_argument('--n_embd',      type=int,   default=ModelConfig.n_embd,      help='Embedding dimension for the model')
     parser.add_argument('--pos_emb',     type=str,   default=ModelConfig.pos_emb,     help='Type of positional encoding (learn, sin, rope)')
-    parser.add_argument('--up_dim',      type=int,   default=ModelConfig.up_dim,      help='Up dimension for the MLP in the model')
-    parser.add_argument('--non_linearity',type=str,   default=ModelConfig.non_linearity,help='Non-linearity for the MLP in the model')
+    parser.add_argument('--up_dim',      type=int,   default=ModelConfig.up_dim,      help='Up dimension for the Expert in the model')
+    parser.add_argument('--non_linearity',type=str,   default=ModelConfig.non_linearity,help='Non-linearity for the Expert in the model')
+    parser.add_argument('--n_exp',       type=int,   default=ModelConfig.n_exp,       help='Number of Experts in the model')
+    parser.add_argument('--n_act',       type=int,   default=ModelConfig.n_act,       help='Number of Active Experts in the model')
+    parser.add_argument('--coeff',       type=int,   default=ModelConfig.coeff,       help='Loss Coefficient for the MoE')
     parser.add_argument('--dropout',     type=float, default=ModelConfig.dropout,     help='Dropout rate for the model')
     parser.add_argument('--n_layer',     type=int,   default=ModelConfig.n_layer,     help='Number of layers in the model')
     parser.add_argument('--attn',        type=str,   default=ModelConfig.attn,         help='Type of attention mechanism (mha, mqa, gqa, mla)')

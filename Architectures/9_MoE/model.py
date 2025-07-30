@@ -385,12 +385,15 @@ class MoE(nn.Module):
         weight_mtx = F.softmax(topk_logits, dim=-1)
 
         # aux loss
-        probs = F.softmax(exp_selec, dim=-1)
-        pi = probs.mean(0)
-        oh_idx = F.one_hot(topk_indx, num_classes=self.n_exp).sum(dim=1)
-        tkns_per_expt = oh_idx.sum(dim=0)
-        fi = tkns_per_expt/n_tkns
-        loss = self.coeff * self.n_exp * torch.sum(pi*fi)
+        if self.training:
+            probs = F.softmax(exp_selec, dim=-1)
+            pi = probs.mean(0)
+            oh_idx = F.one_hot(topk_indx, num_classes=self.n_exp).sum(dim=1)
+            tkns_per_expt = oh_idx.sum(dim=0)
+            fi = tkns_per_expt/n_tkns
+            loss = self.coeff * self.n_exp * torch.sum(pi*fi)
+        else:
+            loss = 0
         
         # dispatch
         topk_indx = topk_indx.flatten()
@@ -398,7 +401,7 @@ class MoE(nn.Module):
         binned_x = x_flat.repeat_interleave(self.n_act, dim=0)[perm_indices]
         tkns_per_expt_count = torch.bincount(bin_ids, minlength=self.n_exp)
         exp_inps = torch.split(binned_x, tkns_per_expt_count.tolist(), dim=0)
-        # exp_outs = [self.experts[i](exp_inps[i]) for i in range(self.n_exp)]      
+        # This is a little inefficient considering the for loop     
         exp_outs = [expert(inp) for expert,inp in zip(self.experts, exp_inps)]      
         
         conc_outs = torch.cat(exp_outs, dim=0)
@@ -421,11 +424,13 @@ class Block(nn.Module):
 
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None):
         # Layer Norm + Attention
-        attn, updated_kv_cache = self.attn.forward(self.ln1(x), freqs_cis, kv_cache)
+        x = self.ln1(x)
+        attn, updated_kv_cache = self.attn.forward(x, freqs_cis, kv_cache)
         x = x + attn
+        x = self.ln2(x)
+        x, aux_loss = x + self.moe.forward(x)
         # Feed-forward network with residual connection
-        x = x + self.mlp(self.ln2(x))
-        return x, updated_kv_cache
+        return x, aux_loss, updated_kv_cache
 
 class LLM(nn.Module):
     """ A simple Large language model """
@@ -537,9 +542,11 @@ class LLM(nn.Module):
             kv_caches = [None] * self.config.n_layer
         
         updated_kv_caches = []
+        aux_loss = torch.tensor(0.0, device=idx.device, requires_grad=True)
         for i, block in enumerate(self.transformer.h):
-            x, updated_kv_cache = block(x, freqs_cis, kv_caches[i])
+            x, aux_loss_block, updated_kv_cache = block(x, freqs_cis, kv_caches[i])
             updated_kv_caches.append(updated_kv_cache)
+            aux_loss += aux_loss_block
 
         x = self.transformer.ln_f(x)
 
@@ -548,9 +555,9 @@ class LLM(nn.Module):
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
             logits = self.lm_head(x[:, [-1], :])
-            loss = None
+            loss,aux_loss = 0, 0
 
-        return logits, loss, updated_kv_caches
+        return logits, loss+aux_loss, updated_kv_caches
     
     @torch.no_grad()
     def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, top_k: int | None = None):
