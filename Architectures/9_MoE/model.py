@@ -39,6 +39,9 @@ class LLMconfig:
     non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu']
     dropout : float
     n_layer : int
+    n_exp : int
+    n_act : int
+    coeff : int
     
     # Attention
     attn : str | Literal['mha', 'mqa', 'gqa', 'mla', 'fmla']
@@ -333,7 +336,7 @@ class Attention(nn.Module):
         return self.attn(x, freqs_cis, kv_cache)
     
 class MLP(nn.Module):
-    """ A simple feed-forward network block. """
+    """ A simple feed-forward network block. aka Expert """
     def __init__(self, config: LLMconfig):
         super().__init__()
         non_linearity_map = {
@@ -358,13 +361,61 @@ class MLP(nn.Module):
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
+
+class MoE(nn.Module):
+    
+    def __init__(self, config:LLMconfig):
+        ''' A Mixture of Experts layer implementation '''
+        super().__init__()
+        self.n_exp = config.n_exp
+        self.n_act = config.n_act
+        self.coeff = config.coeff
+
+        self.experts = nn.ModuleList([MLP(config) for _ in range(config.n_exp)])
+        self.router  = nn.Linear(config.n_embd, config.n_exp, bias=False)
+        
+    def forward(self, x:torch.Tensor):
+        B,T,C = x.shape
+        x_flat = x.view(-1,C)    # (BT, C)
+        n_tkns = x_flat.shape[0]
+        
+        # routing and selecting top k experts
+        exp_selec = self.router(x_flat) # (BT, n_exp)
+        topk_logits, topk_indx = torch.topk(exp_selec, self.n_act)
+        weight_mtx = F.softmax(topk_logits, dim=-1)
+
+        # aux loss
+        probs = F.softmax(exp_selec, dim=-1)
+        pi = probs.mean(0)
+        oh_idx = F.one_hot(topk_indx, num_classes=self.n_exp).sum(dim=1)
+        tkns_per_expt = oh_idx.sum(dim=0)
+        fi = tkns_per_expt/n_tkns
+        loss = self.coeff * self.n_exp * torch.sum(pi*fi)
+        
+        # dispatch
+        topk_indx = topk_indx.flatten()
+        bin_ids, perm_indices = torch.sort(topk_indx)
+        binned_x = x_flat.repeat_interleave(self.n_act, dim=0)[perm_indices]
+        tkns_per_expt_count = torch.bincount(bin_ids, minlength=self.n_exp)
+        exp_inps = torch.split(binned_x, tkns_per_expt_count.tolist(), dim=0)
+        # exp_outs = [self.experts[i](exp_inps[i]) for i in range(self.n_exp)]      
+        exp_outs = [expert(inp) for expert,inp in zip(self.experts, exp_inps)]      
+        
+        conc_outs = torch.cat(exp_outs, dim=0)
+        unbinned_outs = conc_outs[torch.argsort(perm_indices)]
+        unbinned_outs = unbinned_outs.view(n_tkns, self.n_act, C)
+        weighted_out = torch.einsum('tac,ta->tc', unbinned_outs, weight_mtx)
+        
+        y = weighted_out.view(B,T,C)
+        
+        return y,loss 
     
 class Block(nn.Module):
     """ A single Transformer block combining attention and MLP. """
     def __init__(self, config:LLMconfig):
         super().__init__()
         self.attn = Attention(config)
-        self.mlp  = MLP(config)
+        self.moe  = MoE(config)
         self.ln1  = nn.LayerNorm(config.n_embd)
         self.ln2  = nn.LayerNorm(config.n_embd)
 
