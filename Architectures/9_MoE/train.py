@@ -10,7 +10,7 @@ python train.py --compile --max_iters=100 --attn='gqa' --pos_emb='sin'
 
 For details about arguments, see the LLMConfig and TrainConfig classes.'''
 
-import warnings ; warnings.filterwarnings("ignore")
+# import warnings ; warnings.filterwarnings("ignore")
 import math
 import torch
 import argparse
@@ -84,12 +84,12 @@ ModelConfig = LLMconfig(
     n_embd = 256, 
     pos_emb = 'rope',
     # MoE
-    up_dim = 768, 
+    up_dim = 1024, 
     non_linearity = 'gelu',  
     dropout=0.2,
     n_layer = 6,
-    n_exp = 8,
-    n_act = 2,
+    n_exp = 1,
+    n_act = 1,
     coeff = 0.05,
     # Attention
     attn = 'mla', 

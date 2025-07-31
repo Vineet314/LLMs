@@ -335,19 +335,13 @@ class Attention(nn.Module):
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None):
         return self.attn(x, freqs_cis, kv_cache)
     
-class MLP(nn.Module):
-    """ A simple feed-forward network block. aka Expert """
+class Expert(nn.Module):
+    """ A single feed-forward network expert. """
     def __init__(self, config: LLMconfig):
         super().__init__()
         non_linearity_map = {
-            'relu': nn.ReLU(),
-            'gelu': nn.GELU(),
-            'swish': nn.SiLU(),
-            'mish': nn.Mish(),
-            'silu': nn.SiLU(),
-            'selu': nn.SELU(),
-            'celu': nn.CELU(),
-            'elu': nn.ELU(),
+            'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
+            'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
             'lrelu': nn.LeakyReLU(negative_slope=0.01)}
 
         self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
@@ -356,81 +350,74 @@ class MLP(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
         
     def forward(self, x):
-        x = self.c_fc(x)
-        x = self.non_linearity(x)
-        x = self.c_proj(x)
-        x = self.dropout(x)
-        return x
+        return self.dropout(self.c_proj(self.non_linearity(self.c_fc(x))))
 
 class MoE(nn.Module):
-    
-    def __init__(self, config:LLMconfig):
-        ''' A Mixture of Experts layer implementation '''
+    '''This class is a Mixture of Experts (MoE) layer. '''
+
+    def __init__(self, config: LLMconfig):
         super().__init__()
-        self.n_exp = config.n_exp
-        self.n_act = config.n_act
-        self.coeff = config.coeff
+        self.config = config
+            # MoE architecture
+        self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_exp)])
+        self.gate = nn.Linear(config.n_embd, config.n_exp, bias=False)
 
-        self.experts = nn.ModuleList([MLP(config) for _ in range(config.n_exp)])
-        self.router  = nn.Linear(config.n_embd, config.n_exp, bias=False)
-        
-    def forward(self, x:torch.Tensor):
-        B,T,C = x.shape
-        x_flat = x.view(-1,C)    # (BT, C)
-        n_tkns = x_flat.shape[0]
-        
-        # routing and selecting top k experts
-        exp_selec = self.router(x_flat) # (BT, n_exp)
-        topk_logits, topk_indx = torch.topk(exp_selec, self.n_act)
-        weight_mtx = F.softmax(topk_logits, dim=-1)
+    def forward(self, x:torch.tensor)->torch.tensor:
+        """ Forward pass for the Mixture of Experts layer. """
+        B, T, C = x.shape
+        x_flat = x.view(-1, C) # Shape: (B*T, C)
+        n_tokens = x_flat.shape[0]
 
-        # aux loss
-        if self.training:
-            probs = F.softmax(exp_selec, dim=-1)
-            pi = probs.mean(0)
-            oh_idx = F.one_hot(topk_indx, num_classes=self.n_exp).sum(dim=1)
-            tkns_per_expt = oh_idx.sum(dim=0)
-            fi = tkns_per_expt/n_tkns
-            loss = self.coeff * self.n_exp * torch.sum(pi*fi)
-        else:
-            loss = 0
+        # Aux Loss
+        router_logits = self.gate(x_flat)
+        router_probs = F.softmax(router_logits, dim=1)
+        pi = router_probs.mean(dim=0)
+
+        topk_logits, topk_indices = torch.topk(router_logits, self.config.n_act, dim=1)
+        ones = torch.ones_like(topk_indices, dtype=torch.float)
+        fi_counts = torch.zeros(self.config.n_exp, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
+        fi = fi_counts / n_tokens
+
+        aux_loss = self.config.coeff * self.config.n_exp * torch.sum(pi * fi)
+
+        # Dispatching
+        topk_gates = F.softmax(topk_logits, dim=1) # Shape: (n_tokens, n_exp_per_tok)
+        final_output = torch.zeros_like(x_flat)
+
+        for i in range(self.config.n_exp):
+            token_indices, topk_slot = (topk_indices == i).nonzero(as_tuple=True)
+            if token_indices.numel() > 0:
+                # Select the tokens and corresponding gates for this expert
+                tokens_for_expert = x_flat[token_indices]
+                gates_for_expert = topk_gates[token_indices, topk_slot].unsqueeze(1)
+                expert_output = self.experts[i](tokens_for_expert)
+                weighted_output = expert_output * gates_for_expert
+                final_output.index_add_(0, token_indices, weighted_output)
         
-        # dispatch
-        topk_indx = topk_indx.flatten()
-        bin_ids, perm_indices = torch.sort(topk_indx)
-        binned_x = x_flat.repeat_interleave(self.n_act, dim=0)[perm_indices]
-        tkns_per_expt_count = torch.bincount(bin_ids, minlength=self.n_exp)
-        exp_inps = torch.split(binned_x, tkns_per_expt_count.tolist(), dim=0)
-        # This is a little inefficient considering the for loop     
-        exp_outs = [expert(inp) for expert,inp in zip(self.experts, exp_inps)]      
-        
-        conc_outs = torch.cat(exp_outs, dim=0)
-        unbinned_outs = conc_outs[torch.argsort(perm_indices)]
-        unbinned_outs = unbinned_outs.view(n_tkns, self.n_act, C)
-        weighted_out = torch.einsum('tac,ta->tc', unbinned_outs, weight_mtx)
-        
-        y = weighted_out.view(B,T,C)
-        
-        return y,loss 
+        final_output = final_output.view(B, T, C)
+        return final_output, aux_loss
     
 class Block(nn.Module):
-    """ A single Transformer block combining attention and MLP. """
+    """ A single Transformer block combining attention and MLP/MoE. """
     def __init__(self, config:LLMconfig):
         super().__init__()
         self.attn = Attention(config)
-        self.moe  = MoE(config)
+        self.mlp  = MoE(config)
         self.ln1  = nn.LayerNorm(config.n_embd)
         self.ln2  = nn.LayerNorm(config.n_embd)
 
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None):
         # Layer Norm + Attention
-        x = self.ln1(x)
-        attn, updated_kv_cache = self.attn.forward(x, freqs_cis, kv_cache)
-        x = x + attn
-        x = self.ln2(x)
-        x, aux_loss = x + self.moe.forward(x)
-        # Feed-forward network with residual connection
-        return x, aux_loss, updated_kv_cache
+        attn_output, updated_kv_cache = self.attn.forward(self.ln1(x), freqs_cis, kv_cache)
+        x = x + attn_output
+        
+        # MLP/MoE layer with residual connection
+        # The mlp now returns both the output and an auxiliary loss
+        mlp_output, aux_loss = self.mlp(self.ln2(x))
+        x = x + mlp_output
+
+        # Pass the aux_loss up for accumulation
+        return x, updated_kv_cache, aux_loss
 
 class LLM(nn.Module):
     """ A simple Large language model """
@@ -542,25 +529,29 @@ class LLM(nn.Module):
             kv_caches = [None] * self.config.n_layer
         
         updated_kv_caches = []
-        aux_loss = torch.tensor(0.0, device=idx.device, requires_grad=True)
+        total_aux_loss = 0.0
         for i, block in enumerate(self.transformer.h):
-            x, aux_loss_block, updated_kv_cache = block(x, freqs_cis, kv_caches[i])
+            # The block now returns an auxiliary loss from the MoE layer
+            x, updated_kv_cache, aux_loss = block(x, freqs_cis, kv_caches[i])
             updated_kv_caches.append(updated_kv_cache)
-            aux_loss += aux_loss_block
+            total_aux_loss += aux_loss
 
         x = self.transformer.ln_f(x)
 
         if targets is not None:
             logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            main_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            # Add the accumulated auxiliary loss to the main loss
+            # We divide by the number of layers because loss is accumulated from each MoE block
+            loss = main_loss + total_aux_loss / self.config.n_layer
         else:
             logits = self.lm_head(x[:, [-1], :])
-            loss,aux_loss = 0, 0
+            loss = None
 
-        return logits, loss+aux_loss, updated_kv_caches
+        return logits, loss, updated_kv_caches
     
     @torch.no_grad()
-    def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, top_k: int | None = None):
+    def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, topk: int | None = None):
         self.eval()
         kv_caches = [None] * self.config.n_layer
 
@@ -592,13 +583,14 @@ class LLM(nn.Module):
                             else: # c_kv
                                 kv_caches[layer_idx] = layer_cache[:, -keep_len:, :]
 
+            # The forward pass now returns three items; we only need logits and caches for generation
             logits, _, kv_caches = self.forward(input_for_forward, kv_caches=kv_caches)
             logits = logits[:, -1, :]
 
             if temperature > 0:
                 logits = logits / temperature
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            if topk is not None:
+                v, _ = torch.topk(logits, min(topk, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
             
             probs = F.softmax(logits, dim=-1)
