@@ -376,6 +376,7 @@ class MLP(nn.Module):
 class Expert(nn.Module):
     """ A single feed-forward network expert. """
     def __init__(self, config:LLMconfig):
+        super().__init__()
         self.expert = MLP(config)
         
     def forward(self, x):
