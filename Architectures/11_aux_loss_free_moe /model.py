@@ -44,7 +44,8 @@ class LLMconfig:
     n_exp : int
     n_shared : int  
     n_act : int      ### INCLUDES THE SHARED EXPERTS
-    coeff : float
+    alpha : float   # complementry aux loss coeff
+    gamma: float    # bias update speed
     
     # Attention
     attn : str | Literal['mha', 'mqa', 'gqa', 'mla', 'fmla']
@@ -358,7 +359,8 @@ class Expert(nn.Module):
 class MoE(nn.Module):
     '''
     This class implements the DeepSeekMoE layer, featuring shared and routed experts.
-    Ref: https://arxiv.org/abs/2401.06066
+    It uses an Auxiliary-Loss-Free load balancing strategy with a dynamic bias term.
+    Ref: https://arxiv.org/pdf/2412.19437
     '''
 
     def __init__(self, config: LLMconfig):
@@ -376,8 +378,10 @@ class MoE(nn.Module):
         self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_exp)])
         self.gate = nn.Linear(config.n_embd, self.n_routed, bias=False)
 
+        self.register_buffer('expert_bias', torch.zeros(self.n_routed))
+
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """ Forward pass for the DeepSeekMoE layer. """
+        """ Forward pass for the DeepSeekMoE layer with Aux-Loss-Free Balancing. """
         B, T, C = x.shape
         x_flat = x.view(-1, C)  # Shape: (B*T, C)
         n_tokens = x_flat.shape[0]
@@ -393,21 +397,42 @@ class MoE(nn.Module):
 
         router_logits = self.gate(x_flat)
         
-            # Aux Loss 
+        # Add Bias and then select topk
+        biased_router_logits = router_logits + self.expert_bias
+        topk_biased_logits, topk_indices = torch.topk(biased_router_logits, self.n_act_routed, dim=1)
+
+        # Gating weights are based on un-biased logits
+        topk_original_logits = torch.gather(router_logits, 1, topk_indices) 
+        topk_gates = F.softmax(topk_original_logits, dim=1)
+
+        # Calculate expert load and update bias during training only
+        if self.training:
+            with torch.no_grad(): # Ensure this logic doesn't affect gradients
+                ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
+                fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
+                fi = fi_counts / n_tokens
+                ideal_load = 1.0 / self.n_routed
+
+                overloaded_mask = fi > ideal_load
+                underloaded_mask = fi < ideal_load
+
+                self.expert_bias[overloaded_mask] -= self.config.gamma
+                self.expert_bias[underloaded_mask] += self.config.gamma
+        
+        # COMPLEMENTARY LOSS
         router_probs = F.softmax(router_logits, dim=1)
         pi = router_probs.mean(dim=0)
-        
-        topk_logits, topk_indices = torch.topk(router_logits, self.n_act_routed, dim=1)
-        ones = torch.ones_like(topk_indices, dtype=torch.float)
-        fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
+        # We need fi for the loss, but only want to calculate it once.
+        # During inference, we can skip the calculation if not already done.
+        if not self.training:
+            ones = torch.ones_like(topk_indices, dtype=torch.float)
+            fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
         fi = fi_counts / n_tokens
 
-        aux_loss = self.config.coeff * self.n_routed * torch.sum(pi * fi)
-        
-            # Dispatch
-        topk_gates = F.softmax(topk_logits, dim=1)
-        routed_output = torch.zeros_like(x_flat)
+        complementary_loss = self.config.alpha * self.n_routed * torch.sum(pi*fi)
 
+        # Dispatch
+        routed_output = torch.zeros_like(x_flat)
         for i in range(self.n_routed):
             token_indices, topk_slot = (topk_indices == i).nonzero(as_tuple=True)
             if token_indices.numel() > 0:
@@ -423,7 +448,7 @@ class MoE(nn.Module):
         # combine to output
         y = (shared_output + routed_output).view(B, T, C)
         
-        return y, aux_loss
+        return y, complementary_loss
     
 class Block(nn.Module):
     """ A single Transformer block combining attention and MLP/MoE. """

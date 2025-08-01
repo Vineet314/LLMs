@@ -67,7 +67,8 @@ class LLMconfig:
     n_exp : int
     n_shared : int
     n_act : int     ### INCLUDES THE SHARED EXPERTS
-    coeff : float
+    alpha : float
+    gamma : float
     
     # Attention
     attn : str | Literal['mha', 'mqa', 'gqa', 'mla', 'fmla']
@@ -93,7 +94,8 @@ ModelConfig = LLMconfig(
     n_shared = 1,
     n_exp = 16,
     n_act = 8,        ### INCLUDES THE SHARED EXPERTS
-    coeff = 0.01,
+    alpha = 0.0001,
+    gamma = 0.001,
     # Attention
     attn = 'mla', 
     # kv_cache = True, 
@@ -139,7 +141,8 @@ def parse_args():
     parser.add_argument('--n_exp',       type=int,   default=ModelConfig.n_exp,       help='Number of Experts in the model')
     parser.add_argument('--n_shared',    type=int,   default=ModelConfig.n_shared,    help='Number of Shared Experts in the model')
     parser.add_argument('--n_act',       type=int,   default=ModelConfig.n_act,       help='Number of Active Experts in the model')
-    parser.add_argument('--coeff',       type=int,   default=ModelConfig.coeff,       help='Loss Coefficient for the MoE')
+    parser.add_argument('--alpha',       type=int,   default=ModelConfig.alpha,       help='Complementry Loss Coefficient for the MoE')
+    parser.add_argument('--gamma',       type=int,   default=ModelConfig.gamma,       help='Bias Update speed in Aux loss free MoE')
     parser.add_argument('--dropout',     type=float, default=ModelConfig.dropout,     help='Dropout rate for the model')
     parser.add_argument('--n_layer',     type=int,   default=ModelConfig.n_layer,     help='Number of layers in the model')
     parser.add_argument('--attn',        type=str,   default=ModelConfig.attn,         help='Type of attention mechanism (mha, mqa, gqa, mla)')
