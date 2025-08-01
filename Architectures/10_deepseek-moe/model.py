@@ -4,6 +4,8 @@ Credits:
     - This code is highly inspired by Andrej Karpathy's work on his nanoGPT : https://github.com/karpathy/nanoGPT/
     - Thanks to Vizuara AI Labs for detailed explanation of Multi Head Latent Attention Algorithm : https://youtu.be/m1x8vA_Tscc
 
+This model uses the 'Fine-Grained Expert Segmentation' and 'Shared Expert Isolation' from the DeepSeek-MoE : https://arxiv.org/abs/2401.06066
+
 Available settings to choose from : 
 1. Attention Type (with  KV caching): 
    - Multi Head Attention (mha)
@@ -40,8 +42,9 @@ class LLMconfig:
     dropout : float
     n_layer : int
     n_exp : int
-    n_act : int
-    coeff : int
+    n_shared : int  
+    n_act : int      ### INCLUDES THE SHARED EXPERTS
+    coeff : float
     
     # Attention
     attn : str | Literal['mha', 'mqa', 'gqa', 'mla', 'fmla']
@@ -353,49 +356,74 @@ class Expert(nn.Module):
         return self.dropout(self.c_proj(self.non_linearity(self.c_fc(x))))
 
 class MoE(nn.Module):
-    '''This class is a Mixture of Experts (MoE) layer. '''
+    '''
+    This class implements the DeepSeekMoE layer, featuring shared and routed experts.
+    Ref: https://arxiv.org/abs/2401.06066
+    '''
 
     def __init__(self, config: LLMconfig):
         super().__init__()
         self.config = config
-            # MoE architecture
-        self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_exp)])
-        self.gate = nn.Linear(config.n_embd, config.n_exp, bias=False)
+        
+        # first `n_shared` are shared, the rest are routed
+        self.n_shared = config.n_shared
+        self.n_routed = config.n_exp - config.n_shared
+        
+        # Number of experts to activate from the ROUTED pool
+        self.n_act_routed = config.n_act - config.n_shared
+        assert self.n_act_routed > 0, "Number of active experts must be greater than shared experts"
 
-    def forward(self, x:torch.tensor)->torch.tensor:
-        """ Forward pass for the Mixture of Experts layer. """
+        self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_exp)])
+        self.gate = nn.Linear(config.n_embd, self.n_routed, bias=False)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """ Forward pass for the DeepSeekMoE layer. """
         B, T, C = x.shape
-        x_flat = x.view(-1, C) # Shape: (B*T, C)
+        x_flat = x.view(-1, C)  # Shape: (B*T, C)
         n_tokens = x_flat.shape[0]
 
-        # Aux Loss
+        # ___________ SHARED EXPERT PATH ___________
+
+        shared_output = torch.zeros_like(x_flat)
+        if self.n_shared > 0:
+            for i in range(self.n_shared):
+                shared_output += self.experts[i](x_flat) # bypass the router
+
+        #  ___________ ROUTED EXPERT PATH ___________
+
         router_logits = self.gate(x_flat)
+        
+            # Aux Loss 
         router_probs = F.softmax(router_logits, dim=1)
         pi = router_probs.mean(dim=0)
-
-        topk_logits, topk_indices = torch.topk(router_logits, self.config.n_act, dim=1)
+        
+        topk_logits, topk_indices = torch.topk(router_logits, self.n_act_routed, dim=1)
         ones = torch.ones_like(topk_indices, dtype=torch.float)
-        fi_counts = torch.zeros(self.config.n_exp, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
+        fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
         fi = fi_counts / n_tokens
 
-        aux_loss = self.config.coeff * self.config.n_exp * torch.sum(pi * fi)
+        aux_loss = self.config.coeff * self.n_routed * torch.sum(pi * fi)
+        
+            # Dispatch
+        topk_gates = F.softmax(topk_logits, dim=1)
+        routed_output = torch.zeros_like(x_flat)
 
-        # Dispatching
-        topk_gates = F.softmax(topk_logits, dim=1) # Shape: (n_tokens, n_exp_per_tok)
-        final_output = torch.zeros_like(x_flat)
-
-        for i in range(self.config.n_exp):
+        for i in range(self.n_routed):
             token_indices, topk_slot = (topk_indices == i).nonzero(as_tuple=True)
             if token_indices.numel() > 0:
-                # Select the tokens and corresponding gates for this expert
                 tokens_for_expert = x_flat[token_indices]
                 gates_for_expert = topk_gates[token_indices, topk_slot].unsqueeze(1)
-                expert_output = self.experts[i](tokens_for_expert)
+
+                # access the expert using an offset of `n_shared`
+                expert_output = self.experts[i + self.n_shared](tokens_for_expert)
+                
                 weighted_output = expert_output * gates_for_expert
-                final_output.index_add_(0, token_indices, weighted_output)
+                routed_output.index_add_(0, token_indices, weighted_output)
         
-        final_output = final_output.view(B, T, C)
-        return final_output, aux_loss
+        # combine to output
+        y = (shared_output + routed_output).view(B, T, C)
+        
+        return y, aux_loss
     
 class Block(nn.Module):
     """ A single Transformer block combining attention and MLP/MoE. """

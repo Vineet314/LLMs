@@ -11,6 +11,7 @@ python train.py --compile --max_iters=100 --attn='gqa' --pos_emb='sin'
 For details about arguments, see the LLMConfig and TrainConfig classes.'''
 
 # import warnings ; warnings.filterwarnings("ignore")
+import os
 import math
 import torch
 import argparse
@@ -58,14 +59,15 @@ class LLMconfig:
     n_embd : int
     pos_emb : str | Literal['learn','sin','rope']
 
-    # Neural Network
+    # MoE
     up_dim  : int
     non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu']
     dropout : float
     n_layer : int
     n_exp : int
-    n_act : int
-    coeff : int
+    n_shared : int
+    n_act : int     ### INCLUDES THE SHARED EXPERTS
+    coeff : float
     
     # Attention
     attn : str | Literal['mha', 'mqa', 'gqa', 'mla', 'fmla']
@@ -80,17 +82,18 @@ class LLMconfig:
 ModelConfig = LLMconfig(
     # token params
     vocab_size = 50304, 
-    block_size = 2**10, 
+    block_size = 2**10,
     n_embd = 256, 
     pos_emb = 'rope',
     # MoE
-    up_dim = 1024, 
+    up_dim = 768, 
     non_linearity = 'gelu',  
     dropout=0.2,
     n_layer = 6,
-    n_exp = 1,
-    n_act = 1,
-    coeff = 0.05,
+    n_shared = 1,
+    n_exp = 8,
+    n_act = 4,        ### INCLUDES THE SHARED EXPERTS
+    coeff = 0.01,
     # Attention
     attn = 'mla', 
     # kv_cache = True, 
@@ -112,10 +115,10 @@ TrainingConfig = Trainconfig(
     learning_rate = 3e-4,
     warmup_steps = 100,
     grad_clip = 1.0,    
-    compile = True,
+    compile = False if os.name != 'posix' else True,
     save_model = True)
 
-# ___________ CLI-OVERRIDE__________________
+# ___________ CLI-OVERRIDE __________________
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a simple LLM model')
@@ -134,6 +137,7 @@ def parse_args():
     parser.add_argument('--up_dim',      type=int,   default=ModelConfig.up_dim,      help='Up dimension for the Expert in the model')
     parser.add_argument('--non_linearity',type=str,   default=ModelConfig.non_linearity,help='Non-linearity for the Expert in the model')
     parser.add_argument('--n_exp',       type=int,   default=ModelConfig.n_exp,       help='Number of Experts in the model')
+    parser.add_argument('--n_shared',    type=int,   default=ModelConfig.n_shared,    help='Number of Shared Experts in the model')
     parser.add_argument('--n_act',       type=int,   default=ModelConfig.n_act,       help='Number of Active Experts in the model')
     parser.add_argument('--coeff',       type=int,   default=ModelConfig.coeff,       help='Loss Coefficient for the MoE')
     parser.add_argument('--dropout',     type=float, default=ModelConfig.dropout,     help='Dropout rate for the model')
@@ -146,7 +150,7 @@ def parse_args():
     parser.add_argument('--rope_head_dim', type=int, default=ModelConfig.rope_head_dim,help='RoPE head dimension (only for mla)')
     
     parser.add_argument('--total_batch_size_str', type=str, default='2**13', help='Total batch size for training passed in as a string expression')
-    parser.add_argument('--compile',    action='store_true', help='Whether to compile the model with torch.compile()')
+    # parser.add_argument('--compile',    action='store_true', help='Whether to compile the model with torch.compile()')
     parser.add_argument('--eval',       action='store_true', help='Wheter to perform Evalutions once a while')
     parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
 
