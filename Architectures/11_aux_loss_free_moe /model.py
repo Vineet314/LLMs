@@ -455,7 +455,7 @@ class Block(nn.Module):
     def __init__(self, config:LLMconfig):
         super().__init__()
         self.attn = Attention(config)
-        self.mlp  = MoE(config)
+        self.moe  = MoE(config)
         self.ln1  = nn.LayerNorm(config.n_embd)
         self.ln2  = nn.LayerNorm(config.n_embd)
 
@@ -465,9 +465,8 @@ class Block(nn.Module):
         x = x + attn_output
         
         # MLP/MoE layer with residual connection
-        # The mlp now returns both the output and an auxiliary loss
-        mlp_output, aux_loss = self.mlp(self.ln2(x))
-        x = x + mlp_output
+        moe_output, aux_loss = self.moe(self.ln2(x))
+        x = x + moe_output
 
         # Pass the aux_loss up for accumulation
         return x, updated_kv_cache, aux_loss

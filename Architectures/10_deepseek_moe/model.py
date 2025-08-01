@@ -391,9 +391,9 @@ class MoE(nn.Module):
 
         #  ___________ ROUTED EXPERT PATH ___________
 
+            # Aux Loss
         router_logits = self.gate(x_flat)
         
-            # Aux Loss 
         router_probs = F.softmax(router_logits, dim=1)
         pi = router_probs.mean(dim=0)
         

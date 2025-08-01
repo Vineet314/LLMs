@@ -362,7 +362,7 @@ class MoE(nn.Module):
         self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_exp)])
         self.gate = nn.Linear(config.n_embd, config.n_exp, bias=False)
 
-    def forward(self, x:torch.tensor)->torch.tensor:
+    def forward(self, x:torch.Tensor)-> tuple[torch.Tensor, torch.Tensor]:
         """ Forward pass for the Mixture of Experts layer. """
         B, T, C = x.shape
         x_flat = x.view(-1, C) # Shape: (B*T, C)
@@ -390,7 +390,9 @@ class MoE(nn.Module):
                 # Select the tokens and corresponding gates for this expert
                 tokens_for_expert = x_flat[token_indices]
                 gates_for_expert = topk_gates[token_indices, topk_slot].unsqueeze(1)
+
                 expert_output = self.experts[i](tokens_for_expert)
+                
                 weighted_output = expert_output * gates_for_expert
                 final_output.index_add_(0, token_indices, weighted_output)
         
