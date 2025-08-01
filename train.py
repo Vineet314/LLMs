@@ -10,7 +10,8 @@ python train.py --compile --max_iters=100 --attn='gqa' --pos_emb='sin'
 
 For details about arguments, see the LLMConfig and TrainConfig classes.'''
 
-import warnings ; warnings.filterwarnings("ignore")
+# import warnings ; warnings.filterwarnings("ignore")
+import os
 import math
 import torch
 import argparse
@@ -60,13 +61,24 @@ class LLMconfig:
 
     # Neural Network
     up_dim  : int
-    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu']
+    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu','tanh','sigmoid']
     dropout : float
     n_layer : int
+
+    # MoE
+    moe : bool
+
+    n_exp : int
+    n_shared : int  
+    n_act : int      ### INCLUDES THE SHARED EXPERTS
+    coeff : float
+
+    aux_free : bool
+    alpha : float   # complementry aux loss coeff
+    gamma: float    # bias update speed
     
     # Attention
-    attn : str | Literal['mha', 'mqa', 'gqa', 'mla', 'fmla']
-    # kv_cache : bool
+    attn : str | Literal['mha', 'mqa', 'gqa', 'mla']
     n_head : int
     n_kv_heads : int 
         # Only for mla 
@@ -77,28 +89,39 @@ class LLMconfig:
 ModelConfig = LLMconfig(
     # token params
     vocab_size = 50304, 
-    block_size = 2**10, 
+    block_size = 2**10,
     n_embd = 256, 
     pos_emb = 'rope',
-    # FFN
-    up_dim = 1024, 
+    
+    # MoE
+    moe = True,
+
+    up_dim = 384, 
     non_linearity = 'gelu',  
     dropout=0.2,
-    n_layer = 6, 
+    n_layer = 6,
+
+    n_exp = 16,
+    n_shared = 2,
+    n_act = 8,        ### INCLUDES THE SHARED EXPERTS
+
+    coeff=0.01,
+    aux_free=True,
+    alpha = 0.0001,
+    gamma = 0.001,
+
     # Attention
     attn = 'mla', 
-    # kv_cache = True, 
     n_head = 8,
-    n_kv_heads = 4, 
+    n_kv_heads=4,
     # MHLA
     q_latent_dim = 32, 
     kv_latent_dim = 32,
-    rope_head_dim = 16)                
+    rope_head_dim = 16)              
 
 TrainingConfig = Trainconfig(
-    
-    total_batch_size = 2**13,
-    batch_size = 2**3, # how many independent sequences will we process in parallel?
+    total_batch_size = 2**11,
+    batch_size = 2**1, # how many independent sequences will we process in parallel?
     max_iters = 2500,
     eval = False,
     eval_interval=100,
@@ -106,13 +129,14 @@ TrainingConfig = Trainconfig(
     learning_rate = 3e-4,
     warmup_steps = 100,
     grad_clip = 1.0,    
-    compile = True,
+    compile = False if os.name != 'posix' else True,
     save_model = True)
 
 # ___________ CLI-OVERRIDE__________________
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a simple LLM model')
+    # Training Parameters
     parser.add_argument('--batch_size',    type=int,   default=TrainingConfig.batch_size,    help='Batch size for training')
     parser.add_argument('--max_iters',     type=int,   default=TrainingConfig.max_iters,     help='Maximum number of iterations for training')
     parser.add_argument('--eval_interval', type=int,   default=TrainingConfig.eval_interval, help='Interval for evaluation')
@@ -120,24 +144,36 @@ def parse_args():
     parser.add_argument('--learning_rate', type=float, default=TrainingConfig.learning_rate, help='Learning rate for training')
     parser.add_argument('--warmup_steps',  type=int,   default=TrainingConfig.warmup_steps,  help='Number of warmup steps for learning rate')
     parser.add_argument('--grad_clip',     type=float,  default=TrainingConfig.grad_clip,    help='Gradient Clip value')
-
+    # Model Parameters
     parser.add_argument('--vocab_size',  type=int,   default=ModelConfig.vocab_size,  help='Vocabulary size for the model')
     parser.add_argument('--block_size',  type=int,   default=ModelConfig.block_size,  help='Block size for the model')
     parser.add_argument('--n_embd',      type=int,   default=ModelConfig.n_embd,      help='Embedding dimension for the model')
     parser.add_argument('--pos_emb',     type=str,   default=ModelConfig.pos_emb,     help='Type of positional encoding (learn, sin, rope)')
-    parser.add_argument('--up_dim',      type=int,   default=ModelConfig.up_dim,      help='Up dimension for the MLP in the model')
-    parser.add_argument('--non_linearity',type=str,   default=ModelConfig.non_linearity,help='Non-linearity for the MLP in the model')
-    parser.add_argument('--dropout',     type=float, default=ModelConfig.dropout,     help='Dropout rate for the model')
     parser.add_argument('--n_layer',     type=int,   default=ModelConfig.n_layer,     help='Number of layers in the model')
-    parser.add_argument('--attn',        type=str,   default=ModelConfig.attn,         help='Type of attention mechanism (mha, mqa, gqa, mla)')
+    parser.add_argument('--dropout',     type=float, default=ModelConfig.dropout,     help='Dropout rate for the model')
+    # MLP Params
+    parser.add_argument('--up_dim',      type=int,   default=ModelConfig.up_dim,      help='Up dimension for the Expert in the model')
+    parser.add_argument('--non_linearity',type=str,   default=ModelConfig.non_linearity,help='Non-linearity for the Expert in the model')
+    # MoE Params
+    parser.add_argument('--n_exp',       type=int,   default=ModelConfig.n_exp,       help='Number of Experts in the model')
+    parser.add_argument('--n_shared',    type=int,   default=ModelConfig.n_shared,    help='Number of Shared Experts in the model')
+    parser.add_argument('--n_act',       type=int,   default=ModelConfig.n_act,       help='Number of Active Experts in the model')
+    parser.add_argument('--coeff',       type=int,   default=ModelConfig.coeff,       help='Aux Loss Coefficient for the MoE if not using Aux Free')
+    parser.add_argument('--alpha',       type=int,   default=ModelConfig.alpha,       help='Complementry Loss Coefficient for the MoE if using Aux Free')
+    parser.add_argument('--gamma',       type=int,   default=ModelConfig.gamma,       help='Bias Update speed in Aux loss free MoE if using Aux Free')
+    # Attention Params
+    parser.add_argument('--attn',        type=str,   default=ModelConfig.attn,        help='Type of attention mechanism (mha, mqa, gqa, mla)')
     parser.add_argument('--n_head',      type=int,   default=ModelConfig.n_head,      help='Number of attention heads in the model')
     parser.add_argument('--n_kv_heads',  type=int,   default=ModelConfig.n_kv_heads,  help='Number of KV heads in the model (only for gqa)')
     parser.add_argument('--q_latent_dim',  type=int, default=ModelConfig.q_latent_dim,help='Query latent dimension (only for mla)')
     parser.add_argument('--kv_latent_dim', type=int, default=ModelConfig.kv_latent_dim,help='KV latent dimension (only for mla)')
     parser.add_argument('--rope_head_dim', type=int, default=ModelConfig.rope_head_dim,help='RoPE head dimension (only for mla)')
     
-    parser.add_argument('--total_batch_size_str', type=str, default='2**13', help='Total batch size for training passed in as a string expression')
-    parser.add_argument('--compile',    action='store_true', help='Whether to compile the model with torch.compile()')
+    parser.add_argument('--total_batch_size_str', type=str, default='2**11', help='Total batch size for training passed in as a string expression')
+
+   #parser.add_argument('--compile',    action='store_true', help='Whether to compile the model with torch.compile()')
+    parser.add_argument('--moe',        action='store_true', help='Whether to use Mixture of Experts in the model')
+    parser.add_argument('--aux_free',   action='store_true', help='Whether to use Aux Loss Free MoE')
     parser.add_argument('--eval',       action='store_true', help='Wheter to perform Evalutions once a while')
     parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
 

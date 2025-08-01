@@ -2,7 +2,7 @@
 This script builds an LLM model based on the user's CLI inputs.
 Credits:
     - This code is highly inspired by Andrej Karpathy's work on his nanoGPT : https://github.com/karpathy/nanoGPT/
-    - Thanks to Vizuara AI Labs for detailed explanation of Multi Head Latent Attention Algorithm : https://youtu.be/m1x8vA_Tscc
+    - Thanks to Vizuara AI Labs for their detailed explanations of MLA : https://youtu.be/m1x8vA_Tscc
 
 Available settings to choose from : 
 1. Attention Type (with  KV caching): 
@@ -15,7 +15,15 @@ Available settings to choose from :
 2. Positional Encodings:
    - Learnable PE
    - Sinusoidal PE
-   - Rotary PE (RoPE)    
+   - Rotary PE (RoPE)
+
+3. Feed Forward Layers:
+   - Dense Network Layer (moe=False): Fully Connected, MLP layer
+   - Sparse Network Layer (moe=True): Mixture of Exprts
+        - Load Balancing with Auxilary Loss function (aux_free = False) 
+        - Shared Expert Isolation                    (n_shared = 0) 
+        - Fine Grained Expert Segmentation           (set up_dim, n_exp, n_act accordingly)
+        - Aux Loss Free Load Balancing               (aux_free = True)  
 '''
 
 import math
@@ -36,12 +44,24 @@ class LLMconfig:
 
     # Neural Network
     up_dim  : int
-    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu']
+    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu','tanh','sigmoid']
     dropout : float
     n_layer : int
+
+    # MoE
+    moe : bool
+
+    n_exp : int
+    n_shared : int  
+    n_act : int      ### INCLUDES THE SHARED EXPERTS
+    coeff : float
+
+    aux_free : bool
+    alpha : float   # complementry aux loss coeff
+    gamma: float    # bias update speed
     
     # Attention
-    attn : str | Literal['mha', 'mqa', 'gqa', 'mla', 'fmla']
+    attn : str | Literal['mha', 'mqa', 'gqa', 'mla']
     # kv_cache : bool
     n_head : int
     n_kv_heads : int 
@@ -337,15 +357,9 @@ class MLP(nn.Module):
     def __init__(self, config: LLMconfig):
         super().__init__()
         non_linearity_map = {
-            'relu': nn.ReLU(),
-            'gelu': nn.GELU(),
-            'swish': nn.SiLU(),
-            'mish': nn.Mish(),
-            'silu': nn.SiLU(),
-            'selu': nn.SELU(),
-            'celu': nn.CELU(),
-            'elu': nn.ELU(),
-            'lrelu': nn.LeakyReLU(negative_slope=0.01)}
+            'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
+            'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
+            'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh(), 'sigmoid': nn.Sigmoid()}
 
         self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
         self.non_linearity = non_linearity_map.get(config.non_linearity, nn.GELU())
@@ -359,22 +373,149 @@ class MLP(nn.Module):
         x = self.dropout(x)
         return x
     
+class Expert(nn.Module):
+    """ A single feed-forward network expert. """
+    def __init__(self, config:LLMconfig):
+        self.expert = MLP(config)
+        
+    def forward(self, x):
+        return self.expert(x)
+    
+class MoE(nn.Module):
+    '''
+    This class implements the DeepSeekMoE layer, featuring shared and routed experts.
+    It uses an Auxiliary-Loss-Free load balancing strategy with a dynamic bias term.
+    Ref: https://arxiv.org/pdf/2412.19437
+    '''
+
+    def __init__(self, config: LLMconfig):
+        super().__init__()
+        self.config = config
+        
+        # first `n_shared` are shared, the rest are routed
+        self.n_shared = config.n_shared
+        self.n_routed = config.n_exp - config.n_shared
+        
+        # Number of experts to activate from the ROUTED pool
+        self.n_act_routed = config.n_act - config.n_shared
+        assert self.n_act_routed > 0, "Number of active experts must be greater than shared experts"
+
+        self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_exp)])
+        self.gate = nn.Linear(config.n_embd, self.n_routed, bias=False)
+        
+        if config.aux_free:
+            self.register_buffer('expert_bias', torch.zeros(self.n_routed))
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """ Forward pass for the DeepSeekMoE layer with Aux-Loss-Free Balancing. """
+        B, T, C = x.shape
+        x_flat = x.view(-1, C)  # Shape: (B*T, C)
+        n_tokens = x_flat.shape[0]
+
+        # ___________ SHARED EXPERT PATH ___________
+
+        shared_output = torch.zeros_like(x_flat)
+        if self.n_shared > 0:
+            for i in range(self.n_shared):
+                shared_output += self.experts[i](x_flat) # bypass the router
+
+        #  ___________ ROUTED EXPERT PATH ___________
+
+        router_logits = self.gate(x_flat)
+
+        if self.config.aux_free:        
+            # Add Bias and then select topk
+            biased_router_logits = router_logits + self.expert_bias
+            topk_biased_logits, topk_indices = torch.topk(biased_router_logits, self.n_act_routed, dim=1)
+
+            # Gating weights are based on un-biased logits
+            topk_original_logits = torch.gather(router_logits, 1, topk_indices) 
+            topk_gates = F.softmax(topk_original_logits, dim=1)
+
+            # Calculate expert load and update bias during training only
+            if self.training:
+                with torch.no_grad(): # Ensure this logic doesn't affect gradients
+                    ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
+                    fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
+                    fi = fi_counts / n_tokens
+                    ideal_load = 1.0 / self.n_routed
+
+                    overloaded_mask = fi > ideal_load
+                    underloaded_mask = fi < ideal_load
+
+                    self.expert_bias[overloaded_mask] -= self.config.gamma
+                    self.expert_bias[underloaded_mask] += self.config.gamma
+            
+            # COMPLEMENTARY LOSS
+            router_probs = F.softmax(router_logits, dim=1)
+            pi = router_probs.mean(dim=0)
+            # We need fi for the loss, but only want to calculate it once.
+            # During inference, we can skip the calculation if not already done.
+            if not self.training:
+                ones = torch.ones_like(topk_indices, dtype=torch.float)
+                fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
+            fi = fi_counts / n_tokens
+            # complementary_loss
+            aux_loss = self.config.alpha * self.n_routed * torch.sum(pi*fi)
+
+        else:
+            router_probs = F.softmax(router_logits, dim=1)
+            pi = router_probs.mean(dim=0)
+            
+            topk_logits, topk_indices = torch.topk(router_logits, self.n_act_routed, dim=1)
+            ones = torch.ones_like(topk_indices, dtype=torch.float)
+            fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
+            fi = fi_counts / n_tokens
+
+            aux_loss = self.config.coeff * self.n_routed * torch.sum(pi * fi)
+
+            topk_gates = F.softmax(topk_logits, dim=1)  
+
+        # Dispatch
+        routed_output = torch.zeros_like(x_flat)
+
+        for i in range(self.n_routed):
+            token_indices, topk_slot = (topk_indices == i).nonzero(as_tuple=True)
+            if token_indices.numel() > 0:
+                tokens_for_expert = x_flat[token_indices]
+                gates_for_expert = topk_gates[token_indices, topk_slot].unsqueeze(1)
+
+                # access the expert using an offset of `n_shared`
+                expert_output = self.experts[i + self.n_shared](tokens_for_expert)
+                
+                weighted_output = expert_output * gates_for_expert
+                routed_output.index_add_(0, token_indices, weighted_output)
+        
+        # combine to output
+        y = (shared_output + routed_output).view(B, T, C)
+        return y, aux_loss
+
 class Block(nn.Module):
     """ A single Transformer block combining attention and MLP. """
     def __init__(self, config:LLMconfig):
         super().__init__()
+        self.is_moe = config.moe
         self.attn = Attention(config)
-        self.mlp  = MLP(config)
         self.ln1  = nn.LayerNorm(config.n_embd)
         self.ln2  = nn.LayerNorm(config.n_embd)
+        if config.moe:
+            self.moe = MoE(config)
+        else:
+            self.mlp = MLP(config)
 
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None):
         # Layer Norm + Attention
-        attn, updated_kv_cache = self.attn.forward(self.ln1(x), freqs_cis, kv_cache)
-        x = x + attn
-        # Feed-forward network with residual connection
-        x = x + self.mlp(self.ln2(x))
-        return x, updated_kv_cache
+        attn_output, updated_kv_cache = self.attn.forward(self.ln1(x), freqs_cis, kv_cache)
+        x = x + attn_output
+
+        if self.is_moe: 
+            moe_output, aux_loss = self.moe(self.ln2(x))
+            x = x + moe_output
+        else:
+            aux_loss = 0.0
+            x = x + self.mlp(self.ln2(x))
+
+        return x, updated_kv_cache, aux_loss
 
 class LLM(nn.Module):
     """ A simple Large language model """
@@ -486,15 +627,21 @@ class LLM(nn.Module):
             kv_caches = [None] * self.config.n_layer
         
         updated_kv_caches = []
+        total_aux_loss = 0.0
         for i, block in enumerate(self.transformer.h):
-            x, updated_kv_cache = block(x, freqs_cis, kv_caches[i])
+            # The block now returns an auxiliary loss from the MoE layer
+            x, updated_kv_cache, aux_loss = block(x, freqs_cis, kv_caches[i])
             updated_kv_caches.append(updated_kv_cache)
+            total_aux_loss += aux_loss
 
         x = self.transformer.ln_f(x)
 
         if targets is not None:
             logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            main_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            # Add the accumulated auxiliary loss to the main loss
+            # We divide by the number of layers because loss is accumulated from each MoE block
+            loss = main_loss + total_aux_loss / self.config.n_layer
         else:
             logits = self.lm_head(x[:, [-1], :])
             loss = None
@@ -502,7 +649,7 @@ class LLM(nn.Module):
         return logits, loss, updated_kv_caches
     
     @torch.no_grad()
-    def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, top_k: int | None = None):
+    def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, topk: int | None = None):
         self.eval()
         kv_caches = [None] * self.config.n_layer
 
@@ -534,13 +681,14 @@ class LLM(nn.Module):
                             else: # c_kv
                                 kv_caches[layer_idx] = layer_cache[:, -keep_len:, :]
 
+            # The forward pass now returns three items; we only need logits and caches for generation
             logits, _, kv_caches = self.forward(input_for_forward, kv_caches=kv_caches)
             logits = logits[:, -1, :]
 
             if temperature > 0:
                 logits = logits / temperature
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            if topk is not None:
+                v, _ = torch.topk(logits, min(topk, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
             
             probs = F.softmax(logits, dim=-1)

@@ -91,14 +91,13 @@ ModelConfig = LLMconfig(
     non_linearity = 'gelu',  
     dropout=0.2,
     n_layer = 6,
-    n_shared = 1,
+    n_shared = 2,
     n_exp = 16,
     n_act = 8,        ### INCLUDES THE SHARED EXPERTS
     alpha = 0.0001,
     gamma = 0.001,
     # Attention
     attn = 'mla', 
-    # kv_cache = True, 
     n_head = 8,
     n_kv_heads = 4, 
     # MHLA
