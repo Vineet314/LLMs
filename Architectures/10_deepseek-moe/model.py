@@ -2,7 +2,7 @@
 This script builds an LLM model based on the user's CLI inputs.
 Credits:
     - This code is highly inspired by Andrej Karpathy's work on his nanoGPT : https://github.com/karpathy/nanoGPT/
-    - Thanks to Vizuara AI Labs for detailed explanation of Multi Head Latent Attention Algorithm : https://youtu.be/m1x8vA_Tscc
+    - Thanks to Vizuara AI Labs for their detailed explanations of MLA : https://youtu.be/m1x8vA_Tscc
 
 This model uses the 'Fine-Grained Expert Segmentation' and 'Shared Expert Isolation' from the DeepSeek-MoE : https://arxiv.org/abs/2401.06066
 

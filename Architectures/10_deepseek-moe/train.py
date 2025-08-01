@@ -86,13 +86,13 @@ ModelConfig = LLMconfig(
     n_embd = 256, 
     pos_emb = 'rope',
     # MoE
-    up_dim = 768, 
+    up_dim = 384, 
     non_linearity = 'gelu',  
     dropout=0.2,
     n_layer = 6,
     n_shared = 1,
-    n_exp = 8,
-    n_act = 4,        ### INCLUDES THE SHARED EXPERTS
+    n_exp = 16,
+    n_act = 8,        ### INCLUDES THE SHARED EXPERTS
     coeff = 0.01,
     # Attention
     attn = 'mla', 
@@ -106,8 +106,8 @@ ModelConfig = LLMconfig(
 
 TrainingConfig = Trainconfig(
     
-    total_batch_size = 2**13,
-    batch_size = 2**3, # how many independent sequences will we process in parallel?
+    total_batch_size = 2**11,
+    batch_size = 2**1, # how many independent sequences will we process in parallel?
     max_iters = 2500,
     eval = False,
     eval_interval=100,
@@ -149,7 +149,7 @@ def parse_args():
     parser.add_argument('--kv_latent_dim', type=int, default=ModelConfig.kv_latent_dim,help='KV latent dimension (only for mla)')
     parser.add_argument('--rope_head_dim', type=int, default=ModelConfig.rope_head_dim,help='RoPE head dimension (only for mla)')
     
-    parser.add_argument('--total_batch_size_str', type=str, default='2**13', help='Total batch size for training passed in as a string expression')
+    parser.add_argument('--total_batch_size_str', type=str, default='2**11', help='Total batch size for training passed in as a string expression')
     # parser.add_argument('--compile',    action='store_true', help='Whether to compile the model with torch.compile()')
     parser.add_argument('--eval',       action='store_true', help='Wheter to perform Evalutions once a while')
     parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
