@@ -65,7 +65,7 @@ python train.py \
     --q_latent_dim $Q_LATENT_DIM \
     --kv_latent_dim $KV_LATENT_DIM \
     --rope_head_dim $ROPE_HEAD_DIM \
-    --N_EXP $N_EXP \
+    --n_exp $N_EXP \
     --n_shared $N_SHARED \
     --n_act $N_ACT \
     --alpha $ALPHA \

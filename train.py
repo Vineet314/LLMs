@@ -158,9 +158,9 @@ def parse_args():
     parser.add_argument('--n_exp',       type=int,   default=ModelConfig.n_exp,       help='Number of Experts in the model')
     parser.add_argument('--n_shared',    type=int,   default=ModelConfig.n_shared,    help='Number of Shared Experts in the model')
     parser.add_argument('--n_act',       type=int,   default=ModelConfig.n_act,       help='Number of Active Experts in the model')
-    parser.add_argument('--coeff',       type=int,   default=ModelConfig.coeff,       help='Aux Loss Coefficient for the MoE if not using Aux Free')
-    parser.add_argument('--alpha',       type=int,   default=ModelConfig.alpha,       help='Complementry Loss Coefficient for the MoE if using Aux Free')
-    parser.add_argument('--gamma',       type=int,   default=ModelConfig.gamma,       help='Bias Update speed in Aux loss free MoE if using Aux Free')
+    parser.add_argument('--coeff',       type=float, default=ModelConfig.coeff,       help='Aux Loss Coefficient for the MoE if not using Aux Free')
+    parser.add_argument('--alpha',       type=float, default=ModelConfig.alpha,       help='Complementry Loss Coefficient for the MoE if using Aux Free')
+    parser.add_argument('--gamma',       type=float, default=ModelConfig.gamma,       help='Bias Update speed in Aux loss free MoE if using Aux Free')
     # Attention Params
     parser.add_argument('--attn',        type=str,   default=ModelConfig.attn,        help='Type of attention mechanism (mha, mqa, gqa, mla)')
     parser.add_argument('--n_head',      type=int,   default=ModelConfig.n_head,      help='Number of attention heads in the model')
