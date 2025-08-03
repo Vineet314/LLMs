@@ -569,9 +569,35 @@ class LLM(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def get_num_params(self):
-        """Returns the number of parameters in the model."""
+        """Returns the total number of parameters and active parameters in the model."""
         n_params = sum(p.numel() for p in self.parameters())
-        return n_params
+        
+        active_params = 0
+
+        active_params += self.tkn_emb.weight.numel()      # embeddings
+        if self.config.pos_emb == 'learn': active_params += self.pos_emb.weight.numel()
+        active_params += self.transformer.ln_f.weight.numel() + self.transformer.ln_f.bias.numel()
+
+        for block in self.transformer.h:
+            active_params += sum(p.numel() for p in block.attn.parameters())   # ----|
+            active_params += sum(p.numel() for p in block.ln1.parameters())    #     |---> Always active
+            active_params += sum(p.numel() for p in block.ln2.parameters())    # ----|
+
+            if block.is_moe:
+
+                active_params += sum(p.numel() for p in block.moe.gate.parameters())                # ----|
+                for i in range(block.moe.n_shared):                                                 #     |---> Always active
+                    active_params += sum(p.numel() for p in block.moe.experts[i].parameters())      # ----|
+
+                if block.moe.n_routed > 0:
+                    # Calculate params for one routed expert, multiply by the number of active ones
+                    params_per_routed_expert = sum(p.numel() for p in block.moe.experts[block.moe.n_shared].parameters())
+                    active_params += block.moe.n_act_routed * params_per_routed_expert
+            
+            else: # In case a block is not MoE
+                active_params += sum(p.numel() for p in block.mlp.parameters())
+
+        return n_params, active_params
 
     def configure_optimizers(self, weight_decay, learning_rate, device):
         # start with all of the candidate parameters (that require grad)

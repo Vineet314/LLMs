@@ -170,7 +170,7 @@ def parse_args():
     parser.add_argument('--rope_head_dim', type=int, default=ModelConfig.rope_head_dim,help='RoPE head dimension (only for mla)')
     
     parser.add_argument('--total_batch_size_str', type=str, default='2**11', help='Total batch size for training passed in as a string expression')
-
+    # Always compile the model
    #parser.add_argument('--compile',    action='store_true', help='Whether to compile the model with torch.compile()')
     parser.add_argument('--moe',        action='store_true', help='Whether to use Mixture of Experts in the model')
     parser.add_argument('--aux_free',   action='store_true', help='Whether to use Aux Loss Free MoE')
@@ -273,7 +273,8 @@ grad_accum_steps = total_batch_size // (B * T)
 
 #___________CREATE YOUR MODEL_____________
 model = LLM(ModelConfig).to(device)
-print(f"total parameters = {model.get_num_params():,}")
+total, active = model.get_num_params()
+print(f"total parameters = {total:,}, acitive parameters = {active:,}")
 
 if TrainingConfig.compile :  
     print("Using compiled model")
