@@ -1,7 +1,5 @@
-'''
-This script prepares the requested dataset. Needs to be run only once for a dataset.
-for now, only shakespehere data and Tiny stories is supported.
-'''
+'''This script prepares the requested dataset. Needs to be run only once for a dataset.'''
+
 import os
 import tiktoken
 import numpy as np
@@ -11,15 +9,12 @@ from datasets import load_dataset
 n_proc = os.cpu_count() // 2
 DATASET_NAME = "roneneldan/TinyStories"
 EOT_TOKEN_ID = 50256 # End-of-text token for gpt2
-OUTPUT_DIR = 'data/tinystories/'
 
 def tokenize_and_save():
     """
     Downloads, tokenizes, and saves the TinyStories dataset.
     This version uses the `map` method for efficient tokenization.
     """
-
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     print(f"Loading dataset: {DATASET_NAME}")
     dataset = load_dataset(DATASET_NAME, cache_dir='./cache', num_proc=n_proc)
@@ -45,7 +40,7 @@ def tokenize_and_save():
     # Save the tokenized datasets to binary files
     for split, dset in tokenized.items():
         arr_len = np.sum(dset['len'], dtype=np.uint64)
-        file_path = os.path.join(OUTPUT_DIR, f'{split}.bin')
+        file_path = f'{split}.bin'
         dtype = np.uint16 # GPT-2 tokenizer has 50257 tokens
 
         # Write to binary file
