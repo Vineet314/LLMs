@@ -205,28 +205,21 @@ elif ModelConfig.attn == 'mla':
 # _______________ DATASET _________________
 
 class DataLoader:
-    def __init__(self, B, T):
+    def __init__(self, B, T, data):
         self.B = B
         self.T = T
-
-        enc = tiktoken.get_encoding('gpt2')
-        # training data
-        url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-        text = requests.get(url).text
-        tokens = enc.encode(text)
-        self.tokens = torch.tensor(tokens, dtype=torch.long)
-
+        self.tokens = data
         self.current_position = 0
-    
+
     def next_batch(self):
         B, T = self.B, self.T
         buf = self.tokens[self.current_position: self.current_position+(B*T+1)]
         x = (buf[:-1]).view(B,T)
         y = (buf[1:]).view(B,T)
         # advance the position
-        self.current_position += B*T 
+        self.current_position += B*T
 
-        if self.current_position + (B*T*+1)  > len(self.tokens):
+        if self.current_position + (B*T+1)  > len(self.tokens):
             self.current_position = 0
         return x,y
 
@@ -250,14 +243,16 @@ def get_lr(iter, TrainingConfig:Trainconfig):
         return min_lr + coeff * (max_lr - min_lr)
 
 @torch.no_grad()
-def estimate_loss(model:LLM, TrainingConfig:Trainconfig, eval_loader:DataLoader):
+def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader, val_loader:DataLoader):
     out = {}
     model.eval()
-    for split in ['train', 'val']:
+    for split, loader in [('train', train_loader), ('val', val_loader)]:
         losses = torch.zeros(TrainingConfig.eval_iters)
         for k in range(TrainingConfig.eval_iters):
-            X, Y = eval_loader.next_batch()
-            _, loss, _ = model(X, Y)
+            X, Y = loader.next_batch()
+            X, Y = X.to(device), Y.to(device)
+            with ctx:
+                _, loss, _ = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -283,8 +278,18 @@ if TrainingConfig.compile :
 #______________________________________________ TRAINING ______________________________________________
 
 optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
-train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size)
-eval_loader  = None
+
+enc = tiktoken.get_encoding('gpt2')
+url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+text = requests.get(url).text
+tokens = torch.tensor(enc.encode(text), dtype=torch.long)
+n = int(0.9 * len(tokens))
+train_data = tokens[:n]
+val_data = tokens[n:]
+
+# ADDED: Instantiate two DataLoaders, one for training and one for validation
+train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, data=train_data)
+val_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, data=val_data)
 
 for iter in range(TrainingConfig.max_iters+1):
     t0 = time()
@@ -294,12 +299,10 @@ for iter in range(TrainingConfig.max_iters+1):
         param_grp['lr'] = lr
     
     optimizer.zero_grad(set_to_none=True)
-    if TrainingConfig.eval:
-        pass
-        # every once in a while evaluate the loss on train and val sets
-        # if iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters - 1:
-        #     losses = estimate_loss()
-        #     print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+
+    if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters):
+        losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
+        print(f"-----val run------- train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
     for micro_step in range(grad_accum_steps):
 

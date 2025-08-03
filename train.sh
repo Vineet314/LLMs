@@ -10,9 +10,9 @@ LEARNING_RATE=3e-4
 WARMUP_STEPS=100
 GRAD_CLIP=1.0
 EVAL=true
-EVAL_INTERVAL=100
-EVAL_ITERS=20
-SAVE_MODEL=true # Use "--no-save_model" to disable model saving
+EVAL_INTERVAL=250
+EVAL_ITERS=30
+SAVE_MODEL=false 
 
 # --- Model Configuration Arguments ---
 N_LAYER=6
