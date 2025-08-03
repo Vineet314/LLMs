@@ -3,6 +3,7 @@
 # This script runs the train.py Python script with specified command-line arguments.
 
 # --- Training Configuration Arguments ---
+DATASET='tinystories'
 TOTAL_BATCH_SIZE_STR="2**12"
 BATCH_SIZE=4
 MAX_ITERS=3000
@@ -43,6 +44,7 @@ CEOFF=0.01
 
 # Construct the command
 python train.py \
+    --dataset $DATASET \
     --total_batch_size_str $TOTAL_BATCH_SIZE_STR \
     --batch_size $BATCH_SIZE \
     --max_iters $MAX_ITERS \

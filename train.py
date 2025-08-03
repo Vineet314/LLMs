@@ -1,22 +1,8 @@
-'''This script trains an LLM model based on the user's CLI inputs. 
-
-This code is highly inspired by Andrej Karpathy's work on his nanoGPT : https://github.com/karpathy/nanoGPT/
-
-This script is made to be run on a single GPU(preferred)/CPU. For a more sophisticated run involving distributed systems,
-checkout : https://github.com/Vineet314/Distributed-Pytorch/blob/master/LLMs/kaggle-train-v2.py
-
-To run this, either use a bash script, or run:
-python train.py --compile --max_iters=100 --attn='gqa' --pos_emb='sin'
-
-For details about arguments, see the LLMConfig and TrainConfig classes.'''
-
 # import warnings ; warnings.filterwarnings("ignore")
 import os
 import math
 import torch
 import argparse
-import tiktoken
-import requests
 import numpy as np
 
 from time import time
@@ -32,8 +18,9 @@ torch.cuda.manual_seed(1729)
 torch.set_float32_matmul_precision('medium')   # Not sure if this has any effect when used with Auto Mixed Precision
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device_type = 'cuda' if 'cuda' in device else 'cpu'
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
-ctx = torch.amp.autocast(device_type=device, dtype=getattr(torch, dtype))
+ctx = torch.amp.autocast(device_type=device_type, dtype=getattr(torch, dtype))
 scaler = torch.amp.GradScaler(enabled=(dtype == 'float16')) if device == 'cuda' else nullcontext()
 
 # ____________PARAMS-CONFIG_________________
@@ -209,25 +196,37 @@ elif ModelConfig.attn == 'mla':
 # _______________ DATASET _________________
 
 class DataLoader:
-    def __init__(self, B, T, file_path):
-        self.B = B
-        self.T = T
-        self.tokens = np.memmap(file_path, dtype=np.uint16, mode='r')
+    def __init__(self, B, T, file_path, device):
+        self.B = B ; self.T = T
+        self.file_path = file_path
+        self.device = device
+        self.device_type = 'cuda' if 'cuda' in device else 'cpu'
+
 
     def next_batch(self):
+        '''credits to Andrej Karpathy's NanoGPT'''
         B, T = self.B, self.T
+        tokens = np.memmap(self.file_path, dtype=np.uint16, mode='r')
 
-        start_ix = torch.randint(len(self.tokens) - (B * T + 1), (1,)).item()
+        start_ix = torch.randint(len(tokens) - (B * T + 1), (1,)).item()
         # Slice the memory-mapped array. This is where the OS reads from disk.
-        buf = self.tokens[start_ix : start_ix + B * T + 1]
-        
+        buf = tokens[start_ix : start_ix + B * T + 1]
         # .astype(np.int64) is important as torch.LongTensor is 64-bit
         full_tokens = torch.from_numpy(buf.astype(np.int64))
 
         x = full_tokens[:-1].view(B, T)
         y = full_tokens[1:].view(B, T)
         
+        if self.device_type == 'cuda':
+            # Pin memory which allows us to move them to GPU asynchronously (non_blocking=True)
+            x, y = x.pin_memory().to(self.device, non_blocking=True), y.pin_memory().to(self.device, non_blocking=True)
+        else:
+            x, y = x.to(self.device), y.to(self.device)
         return x, y
+
+data_dir = os.path.join('data', TrainingConfig.dataset)
+train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path=os.path.join(data_dir, "train.bin"), device=device)
+val_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path=os.path.join(data_dir, "val.bin"), device=device)
 
 # ____________ UTIL FUNCTIONS _________________
 
@@ -255,8 +254,7 @@ def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader
     for split, loader in [('train', train_loader), ('val', val_loader)]:
         losses = torch.zeros(TrainingConfig.eval_iters)
         for k in range(TrainingConfig.eval_iters):
-            X, Y = loader.next_batch()
-            X, Y = X.to(device), Y.to(device)
+            X, Y = loader.next_batch() # Data is now moved to device in next_batch()
             with ctx:
                 _, loss, _ = model(X, Y)
             losses[k] = loss.item()
@@ -285,18 +283,7 @@ if TrainingConfig.compile :
 
 optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
 
-# enc = tiktoken.get_encoding('gpt2')
-# url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-# text = requests.get(url).text
-# tokens = torch.tensor(enc.encode(text), dtype=torch.long)
-# n = int(0.9 * len(tokens))
-# train_data = tokens[:n]
-# val_data = tokens[n:]
-# train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, data=train_data)
-# val_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, data=val_data)
-
-train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path='data/tinystories/train.bin')
-val_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path='data/tinystories/val.bin')
+x,y = train_loader.next_batch() # get the first batch of training data
 
 for iter in range(TrainingConfig.max_iters+1):
     t0 = time()
@@ -312,13 +299,11 @@ for iter in range(TrainingConfig.max_iters+1):
         print(f"-----val run------- train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
     for micro_step in range(grad_accum_steps):
-
-        x,y = train_loader.next_batch()
-        x,y = x.to(device=device), y.to(device=device)
-
         with ctx:
             _, loss, _ = model(x,y) #logits, loss, kv cache
             loss = loss/grad_accum_steps
+
+        x,y = train_loader.next_batch() # Async prefetch the next batch of data
 
         scaler.scale(loss).backward()
 
