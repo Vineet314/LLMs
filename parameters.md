@@ -12,7 +12,7 @@ These parameters control the training loop, optimization, and evaluation process
 
 | Parameter | Default | Type | Description |
 | :--- | :--- | :--- | :--- |
-| `--total_batch_size_str`| `'2**11'` (`2048`) | int | Total number of tokens to process in one optimization step. This determines the gradient accumulation steps. |
+| `--total_batch_size_str`| `'2**11'` (`2048`) | str | Total number of tokens to process in one optimization step. Must be passed as an expression in a string. This determines the gradient accumulation steps. |
 | `--batch_size` | `2` (`2**1`) | int | The micro-batch size. Number of sequences processed in parallel on the GPU before a gradient accumulation step. |
 | `--max_iters` | `2500` | int | The total number of training iterations (optimization steps) to run. |
 | `--learning_rate` | `3e-4` | float | The maximum learning rate for the AdamW optimizer. |
