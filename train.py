@@ -17,6 +17,7 @@ import torch
 import argparse
 import tiktoken
 import requests
+import numpy as np
 
 from time import time
 from typing import Literal
@@ -39,6 +40,7 @@ scaler = torch.amp.GradScaler(enabled=(dtype == 'float16')) if device == 'cuda' 
 
 @dataclass
 class Trainconfig:
+    dataset : str | Literal['shakespeare', 'tinystories']
     total_batch_size : int
     batch_size : int
     max_iters : int
@@ -120,6 +122,7 @@ ModelConfig = LLMconfig(
     rope_head_dim = 16)              
 
 TrainingConfig = Trainconfig(
+    dataset='shakespeare',
     total_batch_size = 2**11,
     batch_size = 2**1, # how many independent sequences will we process in parallel?
     max_iters = 2500,
@@ -137,6 +140,7 @@ TrainingConfig = Trainconfig(
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a simple LLM model')
     # Training Parameters
+    parser.add_argument('--dataset',       type=str,   default=TrainingConfig.dataset,       help='The data set to be used for training')
     parser.add_argument('--batch_size',    type=int,   default=TrainingConfig.batch_size,    help='Batch size for training')
     parser.add_argument('--max_iters',     type=int,   default=TrainingConfig.max_iters,     help='Maximum number of iterations for training')
     parser.add_argument('--eval_interval', type=int,   default=TrainingConfig.eval_interval, help='Interval for evaluation')
@@ -205,23 +209,25 @@ elif ModelConfig.attn == 'mla':
 # _______________ DATASET _________________
 
 class DataLoader:
-    def __init__(self, B, T, data):
+    def __init__(self, B, T, file_path):
         self.B = B
         self.T = T
-        self.tokens = data
-        self.current_position = 0
+        self.tokens = np.memmap(file_path, dtype=np.uint16, mode='r')
 
     def next_batch(self):
         B, T = self.B, self.T
-        buf = self.tokens[self.current_position: self.current_position+(B*T+1)]
-        x = (buf[:-1]).view(B,T)
-        y = (buf[1:]).view(B,T)
-        # advance the position
-        self.current_position += B*T
 
-        if self.current_position + (B*T+1)  > len(self.tokens):
-            self.current_position = 0
-        return x,y
+        start_ix = torch.randint(len(self.tokens) - (B * T + 1), (1,)).item()
+        # Slice the memory-mapped array. This is where the OS reads from disk.
+        buf = self.tokens[start_ix : start_ix + B * T + 1]
+        
+        # .astype(np.int64) is important as torch.LongTensor is 64-bit
+        full_tokens = torch.from_numpy(buf.astype(np.int64))
+
+        x = full_tokens[:-1].view(B, T)
+        y = full_tokens[1:].view(B, T)
+        
+        return x, y
 
 # ____________ UTIL FUNCTIONS _________________
 
@@ -279,17 +285,18 @@ if TrainingConfig.compile :
 
 optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
 
-enc = tiktoken.get_encoding('gpt2')
-url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-text = requests.get(url).text
-tokens = torch.tensor(enc.encode(text), dtype=torch.long)
-n = int(0.9 * len(tokens))
-train_data = tokens[:n]
-val_data = tokens[n:]
+# enc = tiktoken.get_encoding('gpt2')
+# url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+# text = requests.get(url).text
+# tokens = torch.tensor(enc.encode(text), dtype=torch.long)
+# n = int(0.9 * len(tokens))
+# train_data = tokens[:n]
+# val_data = tokens[n:]
+# train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, data=train_data)
+# val_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, data=val_data)
 
-# ADDED: Instantiate two DataLoaders, one for training and one for validation
-train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, data=train_data)
-val_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, data=val_data)
+train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path='data/tinystories/train.bin')
+val_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path='data/tinystories/val.bin')
 
 for iter in range(TrainingConfig.max_iters+1):
     t0 = time()
@@ -300,7 +307,7 @@ for iter in range(TrainingConfig.max_iters+1):
     
     optimizer.zero_grad(set_to_none=True)
 
-    if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters):
+    if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
         losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
         print(f"-----val run------- train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 

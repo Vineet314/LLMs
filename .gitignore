@@ -18,3 +18,7 @@ venv/
 
 # ignore temp excel files
 *$*.xlsx
+
+*.txt
+*.bin
+*cache*/
