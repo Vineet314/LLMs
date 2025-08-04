@@ -351,7 +351,7 @@ class Attention(nn.Module):
                 
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None):
         return self.attn(x, freqs_cis, kv_cache)
-    
+
 class MLP(nn.Module):
     """ A simple feed-forward network block. """
     def __init__(self, config: LLMconfig):
@@ -372,7 +372,7 @@ class MLP(nn.Module):
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
-    
+
 class Expert(nn.Module):
     """ A single feed-forward network expert. """
     def __init__(self, config:LLMconfig):
@@ -381,7 +381,7 @@ class Expert(nn.Module):
         
     def forward(self, x):
         return self.expert(x)
-    
+
 class MoE(nn.Module):
     '''
     This class implements the DeepSeekMoE layer, featuring shared and routed experts.

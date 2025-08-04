@@ -1,5 +1,8 @@
 '''
 This script builds an LLM model based on the user's CLI inputs.
+
+This script is meant for a demo multi-GPU run, perhaphs on Kaggle which provides free access to 2 GPUs.
+eg: !torchrun --standalone --nproc_per_node=2 kaggle-train.py --moe --aux_free --eval
 Credits:
     - This code is highly inspired by Andrej Karpathy's work on his nanoGPT : https://github.com/karpathy/nanoGPT/
     - Thanks to Vizuara AI Labs for their detailed explanations of MLA : https://youtu.be/m1x8vA_Tscc
@@ -24,16 +27,8 @@ Available settings to choose from :
         - Shared Expert Isolation                    (n_shared = 0) 
         - Fine Grained Expert Segmentation           (set up_dim, n_exp, n_act accordingly)
         - Aux Loss Free Load Balancing               (aux_free = True)  
+'''
 
-This script uses Pytorch's Distributed Data Parallel, meaning the model can be trained on multi-GPU systems.
-On kaggle code, add this as a utility script first, then import it in a Jupyter Notebook.
-Ensure the internet is turned on, and you have 2xGPUs selected as hardware accelerator. 
-Then run:
-!torchrun --standalone --nproc_per_node=2 /path/to/this/scripty.py --attn='mla' --pos_emb='rope' --max_iters=200
-
-For details about arguments, see the LLMConfig and TrainConfig classes.'''
-
-### ----------- Model Script -----------
 import math
 import torch
 import torch.nn as nn
@@ -359,7 +354,7 @@ class Attention(nn.Module):
                 
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None):
         return self.attn(x, freqs_cis, kv_cache)
-    
+
 class MLP(nn.Module):
     """ A simple feed-forward network block. """
     def __init__(self, config: LLMconfig):
@@ -380,7 +375,7 @@ class MLP(nn.Module):
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
-    
+
 class Expert(nn.Module):
     """ A single feed-forward network expert. """
     def __init__(self, config:LLMconfig):
@@ -389,7 +384,7 @@ class Expert(nn.Module):
         
     def forward(self, x):
         return self.expert(x)
-    
+
 class MoE(nn.Module):
     '''
     This class implements the DeepSeekMoE layer, featuring shared and routed experts.
@@ -577,9 +572,35 @@ class LLM(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def get_num_params(self):
-        """Returns the number of parameters in the model."""
+        """Returns the total number of parameters and active parameters in the model."""
         n_params = sum(p.numel() for p in self.parameters())
-        return n_params
+        
+        active_params = 0
+
+        active_params += self.tkn_emb.weight.numel()      # embeddings
+        if self.config.pos_emb == 'learn': active_params += self.pos_emb.weight.numel()
+        active_params += self.transformer.ln_f.weight.numel() + self.transformer.ln_f.bias.numel()
+
+        for block in self.transformer.h:
+            active_params += sum(p.numel() for p in block.attn.parameters())   # ----|
+            active_params += sum(p.numel() for p in block.ln1.parameters())    #     |---> Always active
+            active_params += sum(p.numel() for p in block.ln2.parameters())    # ----|
+
+            if block.is_moe:
+
+                active_params += sum(p.numel() for p in block.moe.gate.parameters())                # ----|
+                for i in range(block.moe.n_shared):                                                 #     |---> Always active
+                    active_params += sum(p.numel() for p in block.moe.experts[i].parameters())      # ----|
+
+                if block.moe.n_routed > 0:
+                    # Calculate params for one routed expert, multiply by the number of active ones
+                    params_per_routed_expert = sum(p.numel() for p in block.moe.experts[block.moe.n_shared].parameters())
+                    active_params += block.moe.n_act_routed * params_per_routed_expert
+            
+            else: # In case a block is not MoE
+                active_params += sum(p.numel() for p in block.mlp.parameters())
+
+        return n_params, active_params
 
     def configure_optimizers(self, weight_decay, learning_rate, device):
         # start with all of the candidate parameters (that require grad)
@@ -706,7 +727,7 @@ class LLM(nn.Module):
 
         self.train()
         return idx
-    
+ 
 ### ----------- Training Script -----------
 
 import os
@@ -714,12 +735,13 @@ import argparse
 import tiktoken
 import requests
 
-from time import time
+from time import perf_counter
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 assert torch.cuda.is_available()
+assert torch.cuda.device_count() > 1
 
 # ______________DEVICE and DTYPE SETUP_________________
 torch.manual_seed(1729)
@@ -749,19 +771,19 @@ ModelConfig = LLMconfig(
     # token params
     vocab_size = 50304, 
     block_size = 2**10,
-    n_embd = 256, 
+    n_embd = 768, 
     pos_emb = 'rope',
     
     # MoE
     moe = True,
 
-    up_dim = 384, 
+    up_dim = 512, 
     non_linearity = 'gelu',  
-    dropout=0.2,
-    n_layer = 6,
+    dropout=0.15,
+    n_layer = 9,
 
-    n_exp = 16,
-    n_shared = 2,
+    n_exp = 32,
+    n_shared = 1,
     n_act = 8,        ### INCLUDES THE SHARED EXPERTS
 
     coeff=0.01,
@@ -774,13 +796,13 @@ ModelConfig = LLMconfig(
     n_head = 8,
     n_kv_heads=4,
     # MHLA
-    q_latent_dim = 32, 
-    kv_latent_dim = 32,
-    rope_head_dim = 16)                
+    q_latent_dim = 256, 
+    kv_latent_dim = 256,
+    rope_head_dim = 256)              
 
 TrainingConfig = Trainconfig(
-    total_batch_size = 2**11,
-    batch_size = 2**1, # how many independent sequences will we process in parallel?
+    total_batch_size = 2**13,
+    batch_size = 2**2, # how many independent sequences will we process in parallel?
     max_iters = 2500,
     eval = False,
     eval_interval=100,
@@ -827,9 +849,7 @@ def parse_args():
     parser.add_argument('--kv_latent_dim', type=int, default=ModelConfig.kv_latent_dim,help='KV latent dimension (only for mla)')
     parser.add_argument('--rope_head_dim', type=int, default=ModelConfig.rope_head_dim,help='RoPE head dimension (only for mla)')
     
-    parser.add_argument('--total_batch_size_str', type=str, default='2**11', help='Total batch size for training passed in as a string expression')
-
-   #parser.add_argument('--compile',    action='store_true', help='Whether to compile the model with torch.compile()')
+    parser.add_argument('--total_batch_size_str', type=str, default=str(Trainconfig.total_batch_size), help='Total batch size for training passed in as a string expression')
     parser.add_argument('--moe',        action='store_true', help='Whether to use Mixture of Experts in the model')
     parser.add_argument('--aux_free',   action='store_true', help='Whether to use Aux Loss Free MoE')
     parser.add_argument('--eval',       action='store_true', help='Wheter to perform Evalutions once a while')
@@ -850,7 +870,6 @@ for key, value in vars(args).items():
             setattr(TrainingConfig, key, value)
         else:
             setattr(ModelConfig, key, value)
-
 if ModelConfig.attn == 'mha':
     ModelConfig.n_kv_heads = ModelConfig.n_head
 elif ModelConfig.attn == 'mqa':
@@ -863,6 +882,7 @@ elif ModelConfig.attn == 'mla':
 
 # _______________ DATASET _________________
 
+# Using The Tiny Shakespeare dataset for demo
 class DataLoader:
     def __init__(self, B, T, process_rank, num_proc):
         self.B = B
@@ -896,7 +916,7 @@ class DataLoader:
 def get_lr(iter, TrainingConfig:Trainconfig):
     max_lr = TrainingConfig.learning_rate
     min_lr = max_lr*0.1
-    max_decay_steps = TrainingConfig.max_iters+2
+    max_decay_steps = TrainingConfig.max_iters + 2 # avoid division by zero
     # 1) linear warump for warmup_steps:
     if iter < TrainingConfig.warmup_steps:
         return max_lr * (iter+1)/TrainingConfig.warmup_steps
@@ -909,16 +929,17 @@ def get_lr(iter, TrainingConfig:Trainconfig):
         decay_ratio = min(decay_ratio, 1.0)  # ensure it does
         coeff = 0.5 * (1 + math.cos(math.pi * decay_ratio))
         return min_lr + coeff * (max_lr - min_lr)
-
+    
 @torch.no_grad()
-def estimate_loss(model:LLM, TrainingConfig:Trainconfig, eval_loader:DataLoader):
+def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader, val_loader:DataLoader):
     out = {}
     model.eval()
-    for split in ['train', 'val']:
+    for split, loader in [('train', train_loader), ('val', val_loader)]:
         losses = torch.zeros(TrainingConfig.eval_iters)
         for k in range(TrainingConfig.eval_iters):
-            X, Y = eval_loader.next_batch()
-            _, loss, _ = model(X, Y)
+            X, Y = loader.next_batch() # Data is now moved to device in next_batch()
+            with ctx:
+                _, loss, _ = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -945,7 +966,10 @@ grad_accum_steps = total_batch_size // (B * T *ddp_world_size)
 
 #___________CREATE YOUR MODEL_____________
 model = LLM(ModelConfig).to(device)
-if master_process : print(f"total parameters = {model.get_num_params():,}")
+if master_process : 
+    total, active = model.get_num_params()
+    print(f"total parameters = {total:,}, acitive parameters = {active:,}")
+
 model = DDP(model, device_ids=[ddp_local_rank])
 
 if master_process : print("Using compiled model")
@@ -957,22 +981,20 @@ raw_model:LLM = model.module
 
 optimizer = raw_model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
 train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, process_rank=ddp_rank, num_proc=ddp_world_size)
-eval_loader  = None
+eval_loader  = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, process_rank=ddp_rank, num_proc=ddp_world_size)
 
 for iter in range(TrainingConfig.max_iters+1):
-    t0 = time()
+    t0 = perf_counter()
 
     lr = get_lr(iter, TrainingConfig) 
     for param_grp in optimizer.param_groups:
         param_grp['lr'] = lr
     
     optimizer.zero_grad(set_to_none=True)
-    if TrainingConfig.eval:
-        pass
-        # every once in a while evaluate the loss on train and val sets
-        # if iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters - 1:
-        #     losses = estimate_loss()
-        #     print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+
+    if master_process and TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
+        losses = estimate_loss(model, TrainingConfig, train_loader, eval_loader)
+        print(f"-----val run------- train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
     for micro_step in range(grad_accum_steps):
         model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
@@ -994,7 +1016,7 @@ for iter in range(TrainingConfig.max_iters+1):
 
     if master_process:
         torch.cuda.synchronize()
-        dt  = (time()-t0)*1000
+        dt  = (perf_counter()-t0)*1000
         print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms")
 
 destroy_process_group()

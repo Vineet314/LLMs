@@ -319,4 +319,7 @@ for iter in range(TrainingConfig.max_iters+1):
     print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps}")
 
 if TrainingConfig.save_model:
-    torch.save(model.state_dict(), 'llm_model.pt')
+    # might do in-training scheckpointing later
+    checkpoint = {'config': ModelConfig, 'model_state': model.state_dict()} 
+    torch.save(checkpoint, 'llm_model.pt')
+    print("Model and config saved to llm_model.pt")
