@@ -4,7 +4,7 @@ Build a custom LLM, and then train it. for now, training is done on Tiny Shakesp
 
 Supported Model Architectures:
    - ***Positional Encodings*** : set `pos_emb` to one of `learn`, `sin`, `rope`.  Default : `rope` 
-   - ***Attention Mechanisms**** : set `attn` to one of `mha`, `mqa`, `gqa`, `mla`. Default : `mla`
+   - ***Attention Mechanisms*** : set `attn` to one of `mha`, `mqa`, `gqa`, `mla`. Default : `mla`
    - ***Model Sparsity*** : set `--moe` flag for MoE, `--aux_free` for Auxilary loss free load balancing
    - Check *[parameters](https://github.com/Vineet314/LLMs/blob/main/parameters.md)* for a full list of Model and training Parameters.
 
@@ -53,10 +53,13 @@ For training on a single GPU, this project firstly aims at understanding the cor
 ## Multi GPU training
 For training on multiple GPUs, check out my repository [Distributed Pytorch](https://github.com/Vineet314/Distributed-Pytorch) which explores distributed training.
 For a try, one can run the `kaggle-train.py` script as per the instructions given in the docstring. Or, it can be run on a single-node multi-gpu server as follows: 
-```bash
-torchrun --standalone --nproc_per_node=8 train.py --max_iters=5000
+```
+# use kaggle only for Demo
+!torchrun --standalone --nproc_per_node=8 train.py --max_iters=5000 --moe --aux_free --eval --eval_interval=20 --max_iters=150
 ```
 ## TODO
+- Run tests using different configurations (and perhaps make a script for that)
+- Explore Parallelism mainly on the other repo
 - ~~Change the Dataloader, use better Datasets for training~~
 - ~~Fix the eval in training script~~
 - ~~Add a sample.py and bash script~~
