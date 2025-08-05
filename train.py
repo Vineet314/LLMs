@@ -282,7 +282,8 @@ optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingCo
 
 x,y = train_loader.next_batch() # get the first batch of training data
 train_loss_stats = []
-val_loss_stats = []
+valrun_val_loss_stats = []
+valrun_train_loss_stats = []
 for iter in range(TrainingConfig.max_iters+1):
     t0 = time()
 
@@ -294,7 +295,8 @@ for iter in range(TrainingConfig.max_iters+1):
 
     if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
         losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
-        val_loss_stats.append(losses['val'])
+        valrun_val_loss_stats.append(losses['val'])
+        valrun_train_loss_stats.append(losses['train'])
         print(f"-----val run------- train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
     for micro_step in range(grad_accum_steps):
@@ -319,7 +321,7 @@ for iter in range(TrainingConfig.max_iters+1):
 
 if TrainingConfig.save_model:
     # might do in-training scheckpointing later
-    loss_stats = {'train':train_loss_stats, 'val':val_loss_stats}
+    loss_stats = {'train':train_loss_stats, 'valrun_val':valrun_val_loss_stats, 'valrun_train':valrun_train_loss_stats}
     checkpoint = {'config': ModelConfig, 'model_state': model.state_dict(), 'iters':iter, 'losses':loss_stats} 
-    torch.save(checkpoint, 'llm_model.pt')
-    print("Model and config saved to llm_model.pt")
+    torch.save(checkpoint, TrainingConfig.file_name+'.pt')
+    print("Model and config saved to {}.pt".format(TrainingConfig.file_name))
