@@ -57,9 +57,9 @@ For a try, one can run the `kaggle-train.py` script as per the instructions give
 torchrun --standalone --nproc_per_node=8 train.py --max_iters=5000
 ```
 ## TODO
-- Change the Dataloader, use better Datasets for training
-- Fix the eval in training script
-- Add a sample.py and bash script
+- ~~Change the Dataloader, use better Datasets for training~~
+- ~~Fix the eval in training script~~
+- ~~Add a sample.py and bash script~~
 - Make and use own tokenizer instead of `tiktoken` 
 - Add ALiBi Positional encodings
 - ~~Explore and implement MoE architectures~~
