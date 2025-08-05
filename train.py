@@ -5,7 +5,7 @@ import torch
 import argparse
 import numpy as np
 
-from time import time
+from time import perf_counter
 from typing import Literal
 from dataclasses import dataclass
 from contextlib import nullcontext
@@ -288,20 +288,23 @@ train_loss_stats = []
 valrun_val_loss_stats = []
 valrun_train_loss_stats = []
 for iter in range(TrainingConfig.max_iters+1):
-    t0 = time()
+    t0 = perf_counter()
 
     lr = get_lr(iter, TrainingConfig) 
     for param_grp in optimizer.param_groups:
         param_grp['lr'] = lr
     
     optimizer.zero_grad(set_to_none=True)
-
+    a,b = 0,0
     if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
+        a = perf_counter()
         losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
         valrun_val_loss_stats.append(losses['val'])
         valrun_train_loss_stats.append(losses['train'])
-        print(f"-----val run------- train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-
+        b = perf_counter()
+        print(f"-----val run------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms-------")
+        t0 = b
+    
     for micro_step in range(grad_accum_steps):
         with ctx:
             _, loss, _ = model(x,y) #logits, loss, kv cache
@@ -319,11 +322,11 @@ for iter in range(TrainingConfig.max_iters+1):
     scaler.update()    
 
     if "cuda" in device : torch.cuda.synchronize()
-    dt  = (time()-t0)*1000
+    dt  = (perf_counter()-t0)*1000
     print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps}")
 
 if TrainingConfig.save_model:
-    # might do in-training scheckpointing later
+    # might do in-training checkpointing later
     loss_stats = {'train':train_loss_stats, 'valrun_val':valrun_val_loss_stats, 'valrun_train':valrun_train_loss_stats}
     checkpoint = {'config': ModelConfig, 'model_state': model.state_dict(), 'iters':iter, 'losses':loss_stats} 
     torch.save(checkpoint, TrainingConfig.file_name+'.pt')
