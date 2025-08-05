@@ -39,6 +39,7 @@ class Trainconfig:
     grad_clip : int
     compile : bool #= False if os.name != 'posix' else True
     save_model : bool
+    file_name : str
 
 @dataclass
 class LLMconfig:
@@ -120,7 +121,8 @@ TrainingConfig = Trainconfig(
     warmup_steps = 100,
     grad_clip = 1.0,    
     compile = False if os.name != 'posix' else True,
-    save_model = True)
+    save_model = True,
+    file_name='llm_model')
 
 # ___________ CLI-OVERRIDE__________________
 
@@ -165,6 +167,7 @@ def parse_args():
     parser.add_argument('--aux_free',   action='store_true', help='Whether to use Aux Loss Free MoE')
     parser.add_argument('--eval',       action='store_true', help='Wheter to perform Evalutions once a while')
     parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
+    parser.add_argument('--file_name', type=str, default=TrainingConfig.file_name, help='Name of the checkpoint to be saved')
 
     return parser.parse_args()
 
