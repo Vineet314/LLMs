@@ -1,4 +1,4 @@
-# import warnings ; warnings.filterwarnings("ignore")
+import warnings ; warnings.filterwarnings("ignore")
 import os
 import math
 import torch
@@ -200,7 +200,6 @@ class DataLoader:
         self.device = device
         self.device_type = 'cuda' if 'cuda' in device else 'cpu'
 
-
     def next_batch(self):
         '''credits to Andrej Karpathy's NanoGPT'''
         B, T = self.B, self.T
@@ -282,7 +281,8 @@ if TrainingConfig.compile :
 optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
 
 x,y = train_loader.next_batch() # get the first batch of training data
-
+train_loss_stats = []
+val_loss_stats = []
 for iter in range(TrainingConfig.max_iters+1):
     t0 = time()
 
@@ -294,15 +294,16 @@ for iter in range(TrainingConfig.max_iters+1):
 
     if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
         losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
+        val_loss_stats.append(losses['val'])
         print(f"-----val run------- train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
     for micro_step in range(grad_accum_steps):
         with ctx:
             _, loss, _ = model(x,y) #logits, loss, kv cache
-            loss = loss/grad_accum_steps
+            loss:torch.Tensor = loss/grad_accum_steps
 
         x,y = train_loader.next_batch() # Async prefetch the next batch of data
-
+        train_loss_stats.append(loss.item())
         scaler.scale(loss).backward()
 
     if TrainingConfig.grad_clip != 0.0:
@@ -318,6 +319,7 @@ for iter in range(TrainingConfig.max_iters+1):
 
 if TrainingConfig.save_model:
     # might do in-training scheckpointing later
-    checkpoint = {'config': ModelConfig, 'model_state': model.state_dict()} 
+    loss_stats = {'train':train_loss_stats, 'val':val_loss_stats}
+    checkpoint = {'config': ModelConfig, 'model_state': model.state_dict(), 'iters':iter, 'losses':loss_stats} 
     torch.save(checkpoint, 'llm_model.pt')
     print("Model and config saved to llm_model.pt")

@@ -6,14 +6,14 @@
 DATASET='tinystories'
 TOTAL_BATCH_SIZE_STR="2**12"
 BATCH_SIZE=4
-MAX_ITERS=3000
+MAX_ITERS=10000
 LEARNING_RATE=3e-4
 WARMUP_STEPS=100
 GRAD_CLIP=1.0
 EVAL=true
 EVAL_INTERVAL=250
 EVAL_ITERS=30
-SAVE_MODEL=false 
+SAVE_MODEL=true
 
 # --- Model Configuration Arguments ---
 N_LAYER=6
@@ -23,7 +23,7 @@ BLOCK_SIZE=1024
 DROPOUT=0.1
 POS_EMB="rope" # Can be 'learn', 'sin', 'rope'
 
-UP_DIM=384
+UP_DIM=256
 NON_LINEARITY="gelu" # Example: 'relu', 'gelu', 'silu'
 
 ATTN="mla" # Can be 'mha', 'mqa', 'gqa', 'mla'
@@ -34,9 +34,9 @@ KV_LATENT_DIM=96 # Only relevant if ATTN is 'mla'
 ROPE_HEAD_DIM=48 # Only relevant if POS_EMB is 'rope'
 
 MOE=true
-N_EXP=32
-N_SHARED=2
-N_ACT=8
+N_EXP=24
+N_SHARED=1
+N_ACT=4
 AUX_FREE=true
 ALPHA=0.0001
 GAMMA=0.001
