@@ -109,7 +109,7 @@ ModelConfig = LLMconfig(
     rope_head_dim = 16)              
 
 TrainingConfig = Trainconfig(
-    dataset='shakespeare',
+    dataset='tinystories',
     total_batch_size = 2**11,
     batch_size = 2**1, # how many independent sequences will we process in parallel?
     max_iters = 2500,
@@ -160,9 +160,7 @@ def parse_args():
     parser.add_argument('--kv_latent_dim', type=int, default=ModelConfig.kv_latent_dim,help='KV latent dimension (only for mla)')
     parser.add_argument('--rope_head_dim', type=int, default=ModelConfig.rope_head_dim,help='RoPE head dimension (only for mla)')
     
-    parser.add_argument('--total_batch_size_str', type=str, default='2**11', help='Total batch size for training passed in as a string expression')
-    # Always compile the model
-   #parser.add_argument('--compile',    action='store_true', help='Whether to compile the model with torch.compile()')
+    parser.add_argument('--total_batch_size_str', type=str, default=str(TrainingConfig.total_batch_size), help='Total batch size for training passed in as a string expression')
     parser.add_argument('--moe',        action='store_true', help='Whether to use Mixture of Experts in the model')
     parser.add_argument('--aux_free',   action='store_true', help='Whether to use Aux Loss Free MoE')
     parser.add_argument('--eval',       action='store_true', help='Wheter to perform Evalutions once a while')

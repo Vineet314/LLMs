@@ -2,7 +2,8 @@
 This script builds an LLM model based on the user's CLI inputs.
 
 This script is meant for a demo multi-GPU run, perhaphs on Kaggle which provides free access to 2 GPUs.
-eg: !torchrun --standalone --nproc_per_node=2 kaggle-train.py --moe --aux_free --eval
+eg: !torchrun --standalone --nproc_per_node=2 kaggle-train.py --moe --aux_free --eval --max_iters=250 --eval_interval=50
+
 Credits:
     - This code is highly inspired by Andrej Karpathy's work on his nanoGPT : https://github.com/karpathy/nanoGPT/
     - Thanks to Vizuara AI Labs for their detailed explanations of MLA : https://youtu.be/m1x8vA_Tscc
@@ -28,7 +29,7 @@ Available settings to choose from :
         - Fine Grained Expert Segmentation           (set up_dim, n_exp, n_act accordingly)
         - Aux Loss Free Load Balancing               (aux_free = True)  
 '''
-
+import warnings; warnings.filterwarnings('ignore')
 import math
 import torch
 import torch.nn as nn
@@ -849,7 +850,7 @@ def parse_args():
     parser.add_argument('--kv_latent_dim', type=int, default=ModelConfig.kv_latent_dim,help='KV latent dimension (only for mla)')
     parser.add_argument('--rope_head_dim', type=int, default=ModelConfig.rope_head_dim,help='RoPE head dimension (only for mla)')
     
-    parser.add_argument('--total_batch_size_str', type=str, default=str(Trainconfig.total_batch_size), help='Total batch size for training passed in as a string expression')
+    parser.add_argument('--total_batch_size_str', type=str, default=str(TrainingConfig.total_batch_size), help='Total batch size for training passed in as a string expression')
     parser.add_argument('--moe',        action='store_true', help='Whether to use Mixture of Experts in the model')
     parser.add_argument('--aux_free',   action='store_true', help='Whether to use Aux Loss Free MoE')
     parser.add_argument('--eval',       action='store_true', help='Wheter to perform Evalutions once a while')
@@ -970,7 +971,7 @@ if master_process :
     total, active = model.get_num_params()
     print(f"total parameters = {total:,}, acitive parameters = {active:,}")
 
-model = DDP(model, device_ids=[ddp_local_rank])
+model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=ModelConfig.moe)
 
 if master_process : print("Using compiled model")
 model = torch.compile(model)
@@ -981,7 +982,7 @@ raw_model:LLM = model.module
 
 optimizer = raw_model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
 train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, process_rank=ddp_rank, num_proc=ddp_world_size)
-eval_loader  = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, process_rank=ddp_rank, num_proc=ddp_world_size)
+val_loader   = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, process_rank=ddp_rank, num_proc=ddp_world_size)
 
 for iter in range(TrainingConfig.max_iters+1):
     t0 = perf_counter()
@@ -992,9 +993,10 @@ for iter in range(TrainingConfig.max_iters+1):
     
     optimizer.zero_grad(set_to_none=True)
 
-    if master_process and TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
-        losses = estimate_loss(model, TrainingConfig, train_loader, eval_loader)
-        print(f"-----val run------- train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+    if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
+        losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
+        if master_process:
+            print(f"-----val run------- train loss {losses['train']:.4f}, val loss {losses['val']:.4f} --------------")
 
     for micro_step in range(grad_accum_steps):
         model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
