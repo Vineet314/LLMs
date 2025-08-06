@@ -213,10 +213,13 @@ class NaiveMHLA(nn.Module):
 
         attn:torch.Tensor = (q @ k_eff @ c_kv.transpose(1,2).unsqueeze(1)) / math.sqrt(hs)
 
-        query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
-        key_indices   = torch.arange(T_full, device=x.device).unsqueeze(0)
-        mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
-        attn = attn.masked_fill(mask == 0, float('-inf'))
+        # query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
+        # key_indices   = torch.arange(T_full, device=x.device).unsqueeze(0)
+        # mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
+        # attn = attn.masked_fill(mask == 0, float('-inf'))
+        
+        mask = torch.triu(torch.ones(T, T_full, device=x.device, dtype=torch.bool), diagonal=T_full - T + 1)
+        attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
         
         attn = self.dropout(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
 
@@ -318,10 +321,13 @@ class FullMHLA(nn.Module):
 
         attn = (attn_c + attn_r)/math.sqrt(hs+dhr)
 
-        query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
-        key_indices = torch.arange(T_full, device=x.device).unsqueeze(0)
-        mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
-        attn = attn.masked_fill(mask == 0, float('-inf')) 
+        # query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
+        # key_indices = torch.arange(T_full, device=x.device).unsqueeze(0)
+        # mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
+        # attn = attn.masked_fill(mask == 0, float('-inf')) 
+
+        mask = torch.triu(torch.ones(T, T_full, device=x.device, dtype=torch.bool), diagonal=T_full - T + 1)
+        attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
 
         attn = self.dropout(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
 
