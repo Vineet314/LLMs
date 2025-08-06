@@ -70,6 +70,11 @@ class LLMconfig:
     kv_latent_dim : int | None
     rope_head_dim : int | None
 
+    non_linearity_map = {
+            'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
+            'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
+            'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh(), 'sigmoid': nn.Sigmoid()}
+
     @staticmethod
     def apply_rotary_emb(x:torch.Tensor, freqs_cis:torch.Tensor)->torch.Tensor:
         ''' Applies RoPE to either the query or the key whose embeddings are to be rotated two at a time.'''
@@ -356,13 +361,9 @@ class MLP(nn.Module):
     """ A simple feed-forward network block. """
     def __init__(self, config: LLMconfig):
         super().__init__()
-        non_linearity_map = {
-            'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
-            'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
-            'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh(), 'sigmoid': nn.Sigmoid()}
-
+        
         self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
-        self.non_linearity = non_linearity_map.get(config.non_linearity, nn.GELU())
+        self.non_linearity = LLMconfig.non_linearity_map.get(config.non_linearity, nn.GELU())
         self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
         self.dropout = nn.Dropout(config.dropout)
         
@@ -386,6 +387,7 @@ class MoE(nn.Module):
     '''
     This class implements the DeepSeekMoE layer, featuring shared and routed experts.
     It uses an Auxiliary-Loss-Free load balancing strategy with a dynamic bias term.
+    This version uses vectorized operations.
     Ref: https://arxiv.org/pdf/2412.19437
     '''
 
@@ -403,7 +405,8 @@ class MoE(nn.Module):
 
         self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_exp)])
         self.gate = nn.Linear(config.n_embd, self.n_routed, bias=False)
-        
+        self.non_linearity = LLMconfig.non_linearity_map.get(config.non_linearity, nn.GELU())
+
         if config.aux_free:
             self.register_buffer('expert_bias', torch.zeros(self.n_routed))
 
@@ -423,74 +426,65 @@ class MoE(nn.Module):
         #  ___________ ROUTED EXPERT PATH ___________
 
         router_logits = self.gate(x_flat)
+        aux_loss = 0.0
 
-        if self.config.aux_free:        
-            # Add Bias and then select topk
+        # aux loss calculation 
+        if self.config.aux_free: # complementary loss     
             biased_router_logits = router_logits + self.expert_bias
             topk_biased_logits, topk_indices = torch.topk(biased_router_logits, self.n_act_routed, dim=1)
-
-            # Gating weights are based on un-biased logits
             topk_original_logits = torch.gather(router_logits, 1, topk_indices) 
             topk_gates = F.softmax(topk_original_logits, dim=1)
 
-            # Calculate expert load and update bias during training only
+            with torch.no_grad():
+                ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
+                fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
+                fi = fi_counts / n_tokens
+
             if self.training:
-                with torch.no_grad(): # Ensure this logic doesn't affect gradients
-                    ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
-                    fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
-                    fi = fi_counts / n_tokens
+                with torch.no_grad():
                     ideal_load = 1.0 / self.n_routed
+                    delta = ideal_load - fi 
+                    self.expert_bias += (self.config.gamma*delta)
 
-                    overloaded_mask = fi > ideal_load
-                    underloaded_mask = fi < ideal_load
-
-                    self.expert_bias[overloaded_mask] -= self.config.gamma
-                    self.expert_bias[underloaded_mask] += self.config.gamma
-            
-            # COMPLEMENTARY LOSS
             router_probs = F.softmax(router_logits, dim=1)
             pi = router_probs.mean(dim=0)
-            # We need fi for the loss, but only want to calculate it once.
-            # During inference, we can skip the calculation if not already done.
-            if not self.training:
-                ones = torch.ones_like(topk_indices, dtype=torch.float)
-                fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
-            fi = fi_counts / n_tokens
-            # complementary_loss
             aux_loss = self.config.alpha * self.n_routed * torch.sum(pi*fi)
-
+        
         else:
             router_probs = F.softmax(router_logits, dim=1)
             pi = router_probs.mean(dim=0)
-            
             topk_logits, topk_indices = torch.topk(router_logits, self.n_act_routed, dim=1)
             ones = torch.ones_like(topk_indices, dtype=torch.float)
             fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
             fi = fi_counts / n_tokens
-
             aux_loss = self.config.coeff * self.n_routed * torch.sum(pi * fi)
-
             topk_gates = F.softmax(topk_logits, dim=1)  
 
-        # Dispatch
-        routed_output = torch.zeros_like(x_flat)
+        # ___________ DISPATCH ___________
 
-        for i in range(self.n_routed):
-            token_indices, topk_slot = (topk_indices == i).nonzero(as_tuple=True)
-            if token_indices.numel() > 0:
-                tokens_for_expert = x_flat[token_indices]
-                gates_for_expert = topk_gates[token_indices, topk_slot].unsqueeze(1)
-
-                # access the expert using an offset of `n_shared`
-                expert_output = self.experts[i + self.n_shared](tokens_for_expert)
-                
-                weighted_output = expert_output * gates_for_expert
-                routed_output.index_add_(0, token_indices, weighted_output)
+        routed_experts = self.experts[self.n_shared:]
+        fc1_weights = torch.stack([exp.expert.c_fc.weight for exp in routed_experts])    #(n_routed, up_dim, n_embd)
+        proj_weights = torch.stack([exp.expert.c_proj.weight for exp in routed_experts]) #(n_routed, n_embd, up_dim)
         
-        # combine to output
+        # Gather the weights for the experts selected by each token
+        active_fc1_weights = fc1_weights[topk_indices]      # (n_tokens, n_act_routed, up_dim, n_embd)
+        active_proj_weights = proj_weights[topk_indices]    # (n_tokens, n_act_routed, n_embd, up_dim)
+
+        # Einsum notation: n=token, k=expert, u=up_dim, c=n_embd
+        # operation: (n, k, u, c) @ (n, c, 1) -> (n, k, u, 1) -> (n, k, u)
+        intermediate_output = torch.einsum('nkuc,nc->nku', active_fc1_weights, x_flat)
+        intermediate_output = self.non_linearity(intermediate_output)
+        
+        # operation: (n, k, c, u) @ (n, k, u, 1) -> (n, k, c, 1) -> (n, k, c)
+        final_expert_outputs = torch.einsum('nkcu,nku->nkc', active_proj_weights, intermediate_output)
+        
+        weighted_outputs = final_expert_outputs * topk_gates.unsqueeze(-1)
+        routed_output = torch.sum(weighted_outputs, dim=1) 
+        
+        # Combine to output
         y = (shared_output + routed_output).view(B, T, C)
         return y, aux_loss
-
+        
 class Block(nn.Module):
     """ A single Transformer block combining attention and MLP. """
     def __init__(self, config:LLMconfig):
