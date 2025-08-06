@@ -1,5 +1,69 @@
 #!/bin/bash
 
+echo "Training Dense Model first"
+
+# --- Dense Model ---
+DATASET='tinystories'
+TOTAL_BATCH_SIZE_STR="2**11"
+BATCH_SIZE=4
+MAX_ITERS=5000
+LEARNING_RATE=6e-4
+WARMUP_STEPS=100
+GRAD_CLIP=1.0
+EVAL=true
+EVAL_INTERVAL=100
+EVAL_ITERS=40
+SAVE_MODEL=true
+FILE_NAME="dense"
+# --- Model Configuration Arguments ---
+N_LAYER=6
+N_EMBD=384
+VOCAB_SIZE=50304
+BLOCK_SIZE=512
+DROPOUT=0.0
+POS_EMB="rope" # Can be 'learn', 'sin', 'rope'
+
+UP_DIM=1536
+NON_LINEARITY="gelu" # Example: 'relu', 'gelu', 'silu'
+
+ATTN="mla" # Can be 'mha', 'mqa', 'gqa', 'mla'
+N_HEAD=8
+N_KV_HEADS=4 # Only relevant if ATTN is 'gqa'
+Q_LATENT_DIM=64 # Only relevant if ATTN is 'mla'
+KV_LATENT_DIM=64 # Only relevant if ATTN is 'mla'
+ROPE_HEAD_DIM=48 # Only relevant if POS_EMB is 'rope'
+
+# Construct the command
+python train.py \
+    --dataset $DATASET \
+    --total_batch_size_str $TOTAL_BATCH_SIZE_STR \
+    --batch_size $BATCH_SIZE \
+    --max_iters $MAX_ITERS \
+    --learning_rate $LEARNING_RATE \
+    --warmup_steps $WARMUP_STEPS \
+    --grad_clip $GRAD_CLIP \
+    --eval_interval $EVAL_INTERVAL \
+    --eval_iters $EVAL_ITERS \
+    --n_layer $N_LAYER \
+    --n_embd $N_EMBD \
+    --vocab_size $VOCAB_SIZE \
+    --block_size $BLOCK_SIZE \
+    --dropout $DROPOUT \
+    --pos_emb $POS_EMB \
+    --up_dim $UP_DIM \
+    --non_linearity $NON_LINEARITY \
+    --attn $ATTN \
+    --n_head $N_HEAD \
+    --n_kv_heads $N_KV_HEADS \
+    --q_latent_dim $Q_LATENT_DIM \
+    --kv_latent_dim $KV_LATENT_DIM \
+    --rope_head_dim $ROPE_HEAD_DIM \
+    --file_name $FILE_NAME \
+    $( [ "$SAVE_MODEL" = true ] && echo "--save_model" ) \
+    $( [ "$EVAL" = true ] && echo "--eval" ) \
+
+echo "Now training MoE Model"
+
 # --- MOE Training ---
 DATASET='tinystories'
 TOTAL_BATCH_SIZE_STR="2**11"
@@ -9,8 +73,8 @@ LEARNING_RATE=6e-4
 WARMUP_STEPS=100
 GRAD_CLIP=1.0
 EVAL=true
-EVAL_INTERVAL=200
-EVAL_ITERS=15
+EVAL_INTERVAL=100
+EVAL_ITERS=40
 SAVE_MODEL=true
 FILE_NAME="moe"
 # --- Model Configuration Arguments ---
@@ -18,7 +82,7 @@ N_LAYER=6
 N_EMBD=384
 VOCAB_SIZE=50304
 BLOCK_SIZE=512
-DROPOUT=0.1
+DROPOUT=0.0
 POS_EMB="rope" # Can be 'learn', 'sin', 'rope'
 
 UP_DIM=256
@@ -76,63 +140,3 @@ python train.py \
     $( [ "$EVAL" = true ] && echo "--eval" ) \
     $( [ "$MOE" = true ] && echo "--moe" ) \
     $( [ "$AUX_FREE" = true ] && echo "--aux_free" )
-
-# --- Dense Model ---
-DATASET='tinystories'
-TOTAL_BATCH_SIZE_STR="2**11"
-BATCH_SIZE=4
-MAX_ITERS=5000
-LEARNING_RATE=6e-4
-WARMUP_STEPS=100
-GRAD_CLIP=1.0
-EVAL=true
-EVAL_INTERVAL=200
-EVAL_ITERS=15
-SAVE_MODEL=true
-FILE_NAME="dense"
-# --- Model Configuration Arguments ---
-N_LAYER=6
-N_EMBD=384
-VOCAB_SIZE=50304
-BLOCK_SIZE=512
-DROPOUT=0.1
-POS_EMB="rope" # Can be 'learn', 'sin', 'rope'
-
-UP_DIM=1536
-NON_LINEARITY="gelu" # Example: 'relu', 'gelu', 'silu'
-
-ATTN="mla" # Can be 'mha', 'mqa', 'gqa', 'mla'
-N_HEAD=8
-N_KV_HEADS=4 # Only relevant if ATTN is 'gqa'
-Q_LATENT_DIM=64 # Only relevant if ATTN is 'mla'
-KV_LATENT_DIM=64 # Only relevant if ATTN is 'mla'
-ROPE_HEAD_DIM=48 # Only relevant if POS_EMB is 'rope'
-
-# Construct the command
-python train.py \
-    --dataset $DATASET \
-    --total_batch_size_str $TOTAL_BATCH_SIZE_STR \
-    --batch_size $BATCH_SIZE \
-    --max_iters $MAX_ITERS \
-    --learning_rate $LEARNING_RATE \
-    --warmup_steps $WARMUP_STEPS \
-    --grad_clip $GRAD_CLIP \
-    --eval_interval $EVAL_INTERVAL \
-    --eval_iters $EVAL_ITERS \
-    --n_layer $N_LAYER \
-    --n_embd $N_EMBD \
-    --vocab_size $VOCAB_SIZE \
-    --block_size $BLOCK_SIZE \
-    --dropout $DROPOUT \
-    --pos_emb $POS_EMB \
-    --up_dim $UP_DIM \
-    --non_linearity $NON_LINEARITY \
-    --attn $ATTN \
-    --n_head $N_HEAD \
-    --n_kv_heads $N_KV_HEADS \
-    --q_latent_dim $Q_LATENT_DIM \
-    --kv_latent_dim $KV_LATENT_DIM \
-    --rope_head_dim $ROPE_HEAD_DIM \
-    --file_name $FILE_NAME \
-    $( [ "$SAVE_MODEL" = true ] && echo "--save_model" ) \
-    $( [ "$EVAL" = true ] && echo "--eval" ) \

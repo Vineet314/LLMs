@@ -88,7 +88,7 @@ ModelConfig = LLMconfig(
 
     up_dim = 384, 
     non_linearity = 'gelu',  
-    dropout=0.2,
+    dropout=0.0,
     n_layer = 6,
 
     n_exp = 16,
