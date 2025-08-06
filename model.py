@@ -440,29 +440,19 @@ class MoE(nn.Module):
             topk_gates = F.softmax(topk_original_logits, dim=1)
 
             # Calculate expert load and update bias during training only
+            with torch.no_grad():
+                ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
+                fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
+                fi = fi_counts / n_tokens
+
             if self.training:
-                with torch.no_grad(): # Ensure this logic doesn't affect gradients
-                    ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
-                    fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
-                    fi = fi_counts / n_tokens
+                with torch.no_grad():
                     ideal_load = 1.0 / self.n_routed
+                    delta = ideal_load - fi 
+                    self.expert_bias += (self.config.gamma*delta)
 
-                    overloaded_mask = fi > ideal_load
-                    underloaded_mask = fi < ideal_load
-
-                    self.expert_bias[overloaded_mask] -= self.config.gamma
-                    self.expert_bias[underloaded_mask] += self.config.gamma
-            
-            # COMPLEMENTARY LOSS
             router_probs = F.softmax(router_logits, dim=1)
             pi = router_probs.mean(dim=0)
-            # We need fi for the loss, but only want to calculate it once.
-            # During inference, we can skip the calculation if not already done.
-            if not self.training:
-                ones = torch.ones_like(topk_indices, dtype=torch.float)
-                fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
-            fi = fi_counts / n_tokens
-            # complementary_loss
             aux_loss = self.config.alpha * self.n_routed * torch.sum(pi*fi)
 
         else:
