@@ -23,12 +23,9 @@ venv/
 *.bin
 *cache*/
 kaggle.py
-<<<<<<< HEAD
-stats.ipynb
+
 test.ipynb
 tests/*.html
 tests/*.pdf
-=======
 # stats.ipynb
-test.ipynb
->>>>>>> 730317d8e024c3a7a990c40dd411cd94a0af2587
+*.png
