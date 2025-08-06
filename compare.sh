@@ -1,21 +1,21 @@
 #!/bin/bash
-
+echo -e "\n ---------TRAINING GQA MOE NOW------------ \n"
 # --- GQA MOE Training ---
 DATASET='tinystories'
 TOTAL_BATCH_SIZE_STR="2**11"
 BATCH_SIZE=4
-MAX_ITERS=5000
-LEARNING_RATE=6e-4
+MAX_ITERS=3600
+LEARNING_RATE=7e-4
 WARMUP_STEPS=100
 GRAD_CLIP=1.0
 EVAL=true
-EVAL_INTERVAL=100
-EVAL_ITERS=40
+EVAL_INTERVAL=75
+EVAL_ITERS=25
 SAVE_MODEL=true
 FILE_NAME="gqa_moe"
 # --- Model Configuration Arguments ---
 N_LAYER=6
-N_EMBD=384
+N_EMBD=256
 VOCAB_SIZE=50304
 BLOCK_SIZE=512
 DROPOUT=0.0
@@ -78,11 +78,10 @@ python train.py \
     $( [ "$AUX_FREE" = true ] && echo "--aux_free" )
 
 # --- Dense Model ---
+echo -e "\n ---------TRAINING GQA DENSE NOW------------ \n"
 FILE_NAME="gqa_dense"
 # --- Model Configuration Arguments ---
-
 UP_DIM=1536
-
 # Construct the command
 python train.py \
     --dataset $DATASET \
@@ -113,7 +112,7 @@ python train.py \
     $( [ "$EVAL" = true ] && echo "--eval" ) \
 
 # --- MOE Training ---
-
+echo -e "\n ---------TRAINING MLA ROPE MOE NOW------------ \n"
 FILE_NAME="mla_moe"
 # --- Model Configuration Arguments ---
 ATTN="mla" # Can be 'mha', 'mqa', 'gqa', 'mla'
@@ -156,10 +155,10 @@ python train.py \
     $( [ "$AUX_FREE" = true ] && echo "--aux_free" )
 
 # --- Dense Model ---
+echo -e "\n ---------TRAINING MLA ROPE DENSE NOW------------ \n"
 FILE_NAME="mla_dense"
 # --- Model Configuration Arguments ---
 UP_DIM=1536
-
 # Construct the command
 python train.py \
     --dataset $DATASET \
@@ -190,7 +189,7 @@ python train.py \
     $( [ "$EVAL" = true ] && echo "--eval" ) \
 
 # --- MOE Training ---
-
+echo -e "\n ---------TRAINING MLA SIN MOE NOW------------ \n"
 FILE_NAME="sin_mhla_moe"
 # --- Model Configuration Arguments ---
 UP_DIM=256
@@ -234,6 +233,7 @@ python train.py \
     $( [ "$AUX_FREE" = true ] && echo "--aux_free" )
 
 # --- Dense Model ---
+echo -e "\n ---------TRAINING MLA SIN DENSE NOW------------ \n"
 FILE_NAME="sin_mhla_dense"
 # --- Model Configuration Arguments ---
 UP_DIM=1536

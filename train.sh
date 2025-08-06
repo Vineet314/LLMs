@@ -6,7 +6,7 @@
 DATASET='tinystories'
 TOTAL_BATCH_SIZE_STR="2**12"
 BATCH_SIZE=4
-MAX_ITERS=10000
+MAX_ITERS=3000
 LEARNING_RATE=3e-4
 WARMUP_STEPS=100
 GRAD_CLIP=1.0
@@ -14,7 +14,7 @@ EVAL=true
 EVAL_INTERVAL=250
 EVAL_ITERS=30
 SAVE_MODEL=true
-
+FILE_NAME="test_run"
 # --- Model Configuration Arguments ---
 N_LAYER=6
 N_EMBD=384
@@ -23,7 +23,7 @@ BLOCK_SIZE=1024
 DROPOUT=0.01
 POS_EMB="rope" # Can be 'learn', 'sin', 'rope'
 
-UP_DIM=256
+UP_DIM=1536
 NON_LINEARITY="gelu" # Example: 'relu', 'gelu', 'silu'
 
 ATTN="mla" # Can be 'mha', 'mqa', 'gqa', 'mla'
@@ -33,7 +33,7 @@ Q_LATENT_DIM=64 # Only relevant if ATTN is 'mla'
 KV_LATENT_DIM=64 # Only relevant if ATTN is 'mla'
 ROPE_HEAD_DIM=48 # Only relevant if POS_EMB is 'rope'
 
-MOE=true
+MOE=false
 N_EXP=16
 N_SHARED=1
 N_ACT=4
@@ -73,6 +73,7 @@ python train.py \
     --alpha $ALPHA \
     --gamma $GAMMA \
     --coeff $CEOFF \
+    --file_name $FILE_NAME \
     $( [ "$SAVE_MODEL" = true ] && echo "--save_model" ) \
     $( [ "$EVAL" = true ] && echo "--eval" ) \
     $( [ "$MOE" = true ] && echo "--moe" ) \
