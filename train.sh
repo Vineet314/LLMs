@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# This script runs the train.py Python script with specified command-line arguments.
+# Train a single model.
 
 # --- Training Configuration Arguments ---
 DATASET='tinystories'
@@ -14,7 +14,7 @@ EVAL=true
 EVAL_INTERVAL=250
 EVAL_ITERS=30
 SAVE_MODEL=true
-FILE_NAME="test_run"
+FILE_NAME="llm_model"
 # --- Model Configuration Arguments ---
 N_LAYER=6
 N_EMBD=384
@@ -24,7 +24,7 @@ DROPOUT=0.01
 POS_EMB="rope" # Can be 'learn', 'sin', 'rope'
 
 UP_DIM=1536
-NON_LINEARITY="gelu" # Example: 'relu', 'gelu', 'silu'
+NON_LINEARITY="swiglu" # Example: 'relu', 'gelu', 'silu'
 
 ATTN="mla" # Can be 'mha', 'mqa', 'gqa', 'mla'
 N_HEAD=8

@@ -51,7 +51,7 @@ class LLMconfig:
 
     # Neural Network
     up_dim  : int
-    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu','tanh','sigmoid']
+    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'glu', 'swiglu', 'swish', 'mish', 'silu', 'selu','celu','tanh','sigmoid']
     dropout : float
     n_layer : int
 
@@ -87,7 +87,7 @@ ModelConfig = LLMconfig(
     moe = True,
 
     up_dim = 384, 
-    non_linearity = 'gelu',  
+    non_linearity = 'swiglu',  
     dropout=0.0,
     n_layer = 6,
 
@@ -302,7 +302,7 @@ for iter in range(TrainingConfig.max_iters+1):
         valrun_val_loss_stats.append(losses['val'])
         valrun_train_loss_stats.append(losses['train'])
         b = perf_counter()
-        print(f"-----val run------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms-------")
+        print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
         t0 = b
     
     for micro_step in range(grad_accum_steps):
@@ -328,6 +328,6 @@ for iter in range(TrainingConfig.max_iters+1):
 if TrainingConfig.save_model:
     # might do in-training checkpointing later
     loss_stats = {'train':train_loss_stats, 'valrun_val':valrun_val_loss_stats, 'valrun_train':valrun_train_loss_stats}
-    checkpoint = {'config': ModelConfig, 'model_state': model.state_dict(), 'iters':iter, 'losses':loss_stats} 
+    checkpoint = {'config': ModelConfig, 'train_config':TrainingConfig, 'model_state': model.state_dict(), 'iters':iter, 'losses':loss_stats} 
     torch.save(checkpoint, TrainingConfig.file_name+'.pt')
     print("Model and config saved to {}.pt".format(TrainingConfig.file_name))
