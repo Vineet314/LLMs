@@ -29,12 +29,12 @@ NON_LINEARITY="gelu" # Example: 'relu', 'gelu', 'silu'
 ATTN="mla" # Can be 'mha', 'mqa', 'gqa', 'mla'
 N_HEAD=8
 N_KV_HEADS=4 # Only relevant if ATTN is 'gqa'
-Q_LATENT_DIM=96 # Only relevant if ATTN is 'mla'
-KV_LATENT_DIM=96 # Only relevant if ATTN is 'mla'
+Q_LATENT_DIM=64 # Only relevant if ATTN is 'mla'
+KV_LATENT_DIM=64 # Only relevant if ATTN is 'mla'
 ROPE_HEAD_DIM=48 # Only relevant if POS_EMB is 'rope'
 
 MOE=true
-N_EXP=24
+N_EXP=16
 N_SHARED=1
 N_ACT=4
 AUX_FREE=true
