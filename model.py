@@ -358,6 +358,19 @@ class Attention(nn.Module):
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
         return self.attn(x, freqs_cis, kv_cache, VAL_RUN)
 
+class SwiGLU(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.linear_1 = nn.Linear(dim,dim)
+        self.linear_2 = nn.Linear(dim,dim)
+
+    def forward(self, x):
+        output = self.linear_1(x)
+        swish  = output * torch.sigmoid(output)
+        swiglu = swish * self.linear_2(x)
+
+        return swiglu
+
 class MLP(nn.Module):
     """ A simple feed-forward network block. """
     def __init__(self, config: LLMconfig):
@@ -365,7 +378,8 @@ class MLP(nn.Module):
         non_linearity_map = {
             'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
             'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
-            'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh(), 'sigmoid': nn.Sigmoid()}
+            'glu' : nn.GLU(), 'sigmoid': nn.Sigmoid(), 'swiglu': SwiGLU(config.n_embd),
+            'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh()}
 
         self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
         self.non_linearity = non_linearity_map.get(config.non_linearity, nn.GELU())
