@@ -1,6 +1,6 @@
-# Large Language Models (LLMs) 
+# Large Language Models (LLMs)
 
-Build a custom LLM, and then train it. for now, training is done on Tiny Shakespeare data, as we are limited to a single GPU
+Build a custom LLM, and then train it. For now, training can be done on TinyStories dataset or Tiny shakespeare data, since most of these codes can be run on a single GPU.
 
 Supported Model Architectures:
    - ***Positional Encodings*** : set `pos_emb` to one of `learn`, `sin`, `rope`.  Default : `rope` 
@@ -8,10 +8,10 @@ Supported Model Architectures:
    - ***Model Sparsity*** : set `--moe` flag for MoE, `--aux_free` for Auxilary loss free load balancing
    - Check *[parameters](https://github.com/Vineet314/LLMs/blob/main/parameters.md)* for a full list of Model and training Parameters.
 
-## Quickstart
+## Quickstart ⚡
 On a Windows Laptop with a CPU you can run:
 ```powershell
-PS C:\> python train.py --attn='mqa' --pos_emb='sin' --batch_size=1 --block_size=256 --total_batch_size_str='2**8'
+PS C:\> python train.py --dataset='shakespeare' --attn='mqa' --pos_emb='sin' --batch_size=1 --block_size=256 --total_batch_size_str='2**8'
 ```
 Or a slightly complex one, if you have a GPU:
 ```powershell
@@ -29,7 +29,7 @@ Check out `train.sh` if you want to make any changes in settings and run:
 # --max_iters=5000
 ```
 
-## Architectures
+## Architectures 🏢
 > Dev environement for implementing newer model architectures, starting from [NanoGPT](https://github.com/karpathy/nanoGPT) as the Base. 
 
 This repository contains examples and scripts for training Large Language Models (LLMs) using PyTorch.
@@ -50,7 +50,13 @@ For training on a single GPU, this project firstly aims at understanding the cor
   - `deepseek_moe` : Upgrades the standard MoE architecture along the lines of [DeepSeek MoE](https://arxiv.org/abs/2401.06066), mainly the Fine-Grained Expert Segmentation and Shared Expert Isolation.
   - `aux_loss_free_moe` : Replaces the Aux Loss by a much smaller complimentry loss, introducing bias correction in router logits. Introduced in [DeepSeek V3](https://arxiv.org/abs/2412.19437)
 
-## Multi GPU training
+## Experiments 🔬
+> Research Environment; search for optimal configuration, parameters and hyper parameters.
+   - Exp1 : Comparison of different Attention Mechanisms (GQA, MLA), each with RoPE and SinusoidalPositional Embedding. (4 dense models) 
+   - Exp2 : Previous experiment, but with auxiliary loss free MoE models. 
+   - Exp3 : TBD
+
+## Multi GPU training 🛜
 For training on multiple GPUs, check out my repository [Distributed Pytorch](https://github.com/Vineet314/Distributed-Pytorch) which explores distributed training.
 For a try, one can run the `kaggle-train.py` script as per the instructions given in the docstring. Or, it can be run on a single-node multi-gpu server as follows: 
 ```
