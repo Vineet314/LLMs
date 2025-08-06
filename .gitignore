@@ -25,3 +25,5 @@ venv/
 kaggle.py
 stats.ipynb
 test.ipynb
+tests/*.html
+tests/*.pdf
