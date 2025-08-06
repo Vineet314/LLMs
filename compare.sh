@@ -18,7 +18,7 @@ N_LAYER=6
 N_EMBD=384
 VOCAB_SIZE=50304
 BLOCK_SIZE=512
-DROPOUT=0.1
+DROPOUT=0.01
 POS_EMB="rope" # Can be 'learn', 'sin', 'rope'
 
 UP_DIM=256
@@ -95,7 +95,7 @@ N_LAYER=6
 N_EMBD=384
 VOCAB_SIZE=50304
 BLOCK_SIZE=512
-DROPOUT=0.1
+DROPOUT=0.01
 POS_EMB="rope" # Can be 'learn', 'sin', 'rope'
 
 UP_DIM=1536
