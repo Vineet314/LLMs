@@ -23,5 +23,5 @@ venv/
 *.bin
 *cache*/
 kaggle.py
-stats.ipynb
+# stats.ipynb
 test.ipynb
