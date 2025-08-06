@@ -250,7 +250,7 @@ def get_lr(iter, TrainingConfig:Trainconfig):
 @torch.no_grad()
 def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader, val_loader:DataLoader):
     out = {}
-    model.eval()
+    model.eval() ; model.VAL_RUN = True
     for split, loader in [('train', train_loader), ('val', val_loader)]:
         losses = torch.zeros(TrainingConfig.eval_iters)
         for k in range(TrainingConfig.eval_iters):
@@ -259,7 +259,7 @@ def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader
                 _, loss, _ = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
-    model.train()
+    model.train(); model.VAL_RUN = False
     return out
 
 #___________GRAD_ACCUM SETUP_____________
