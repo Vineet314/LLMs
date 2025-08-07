@@ -28,4 +28,4 @@ test.ipynb
 tests/*.html
 tests/*.pdf
 # stats.ipynb
-*.png
+
