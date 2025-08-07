@@ -19,8 +19,9 @@ torch.set_float32_matmul_precision('medium')   # Not sure if this has any effect
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 device_type = 'cuda' if 'cuda' in device else 'cpu'
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
-ctx = torch.amp.autocast(device_type=device_type, dtype=getattr(torch, dtype)) if device == 'cuda' else nullcontext()
-scaler = torch.amp.GradScaler(enabled=(dtype == 'float16')) 
+ctx = nullcontext()
+scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
+torch.set_default_dtype(torch.bfloat16)
 
 # ____________PARAMS-CONFIG_________________
 
