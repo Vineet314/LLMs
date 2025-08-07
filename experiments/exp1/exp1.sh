@@ -1,6 +1,10 @@
 #!/bin/bash
 
-# AIM : To compare different Attention Mechanisms (All Dense Models)
+# AIM : To compare different Attention Mechanisms (All Dense Models):
+    # 1. GQA with RoPE
+    # 2. MLA with RoPE
+    # 3. GQA with sin
+    # 4. MLA with sin
 
 # --------Global Settings--------
 DATASET="tinystories"
@@ -42,7 +46,7 @@ ALPHA=0.0001
 GAMMA=0.001
 CEOFF=0.01
 
-echo -e "\n --------- TRAINING MODEL#1 ------------ \n"
+echo -e "\n --------- TRAINING MODEL#1 : GQA-ROPE ------------ \n"
 
 FILE_NAME="gqa_rope"
 ATTN="gqa"
@@ -71,7 +75,7 @@ python ../../train.py \
     $( [ "$SAVE_MODEL" = true ] && echo "--save_model" ) \
     $( [ "$EVAL" = true ] && echo "--eval" )
 
-echo -e "\n ---------TRAINING MODEL#2------------ \n"
+echo -e "\n ---------TRAINING MODEL#2 : MLA:ROPE------------ \n"
 
 FILE_NAME="mla_rope"
 ATTN="mla"
@@ -102,7 +106,7 @@ python ../../train.py \
     $( [ "$SAVE_MODEL" = true ] && echo "--save_model" ) \
     $( [ "$EVAL" = true ] && echo "--eval" )
 
-echo -e "\n --------- TRAINING MODEL#3 ------------ \n"
+echo -e "\n --------- TRAINING MODEL#3 GQA:SIN ------------ \n"
 
 FILE_NAME="gqa_sin"
 ATTN="gqa"
@@ -132,7 +136,7 @@ python ../../train.py \
     $( [ "$SAVE_MODEL" = true ] && echo "--save_model" ) \
     $( [ "$EVAL" = true ] && echo "--eval" )
 
-echo -e "\n ---------TRAINING MODEL#4------------ \n"
+echo -e "\n ---------TRAINING MODEL#4 : MLA:SIN------------ \n"
 
 FILE_NAME="mla_sin"
 ATTN="mla"
