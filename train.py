@@ -328,6 +328,12 @@ for iter in range(TrainingConfig.max_iters+1):
 if TrainingConfig.save_model:
     # might do in-training checkpointing later
     loss_stats = {'train':train_loss_stats, 'valrun_val':valrun_val_loss_stats, 'valrun_train':valrun_train_loss_stats}
-    checkpoint = {'config': ModelConfig, 'train_config':TrainingConfig, 'model_state': model.state_dict(), 'iters':iter, 'losses':loss_stats} 
-    torch.save(checkpoint, TrainingConfig.file_name+'.pt')
-    print("Model and config saved to {}.pt".format(TrainingConfig.file_name))
+
+    checkpoint = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'model_state': model.state_dict()}
+    stats      = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'losses':loss_stats, 'total_params':total, 'active_params':active}
+
+    torch.save(checkpoint, TrainingConfig.file_name+'_ckpt.pt')
+    torch.save(stats, TrainingConfig.file_name+'_stats.pt')
+
+    print("Model and config saved to {}.pt".format(TrainingConfig.file_name + '_ckpt'))
+    print("Stats and config saved to {}.pt".format(TrainingConfig.file_name + '_stats'))
