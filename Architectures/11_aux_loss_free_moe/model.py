@@ -38,18 +38,24 @@ class LLMconfig:
 
     # Neural Network
     up_dim  : int
-    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu']
+    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu','tanh','sigmoid']
     dropout : float
     n_layer : int
+
+    # MoE
+    moe : bool
+
     n_exp : int
     n_shared : int  
     n_act : int      ### INCLUDES THE SHARED EXPERTS
+    coeff : float
+
+    aux_free : bool
     alpha : float   # complementry aux loss coeff
     gamma: float    # bias update speed
     
     # Attention
-    attn : str | Literal['mha', 'mqa', 'gqa', 'mla', 'fmla']
-    # kv_cache : bool
+    attn : str | Literal['mha', 'mqa', 'gqa', 'mla']
     n_head : int
     n_kv_heads : int 
         # Only for mla 
@@ -339,14 +345,15 @@ class Attention(nn.Module):
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
         return self.attn(x, freqs_cis, kv_cache, VAL_RUN)
     
-class Expert(nn.Module):
-    """ A single feed-forward network expert. """
+class MLP(nn.Module):
+    """ A simple feed-forward network block. """
     def __init__(self, config: LLMconfig):
         super().__init__()
         non_linearity_map = {
             'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
             'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
-            'lrelu': nn.LeakyReLU(negative_slope=0.01)}
+            'glu' : nn.GLU(), 'sigmoid': nn.Sigmoid(),
+            'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh()}
 
         self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
         self.non_linearity = non_linearity_map.get(config.non_linearity, nn.GELU())
@@ -354,7 +361,20 @@ class Expert(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
         
     def forward(self, x):
-        return self.dropout(self.c_proj(self.non_linearity(self.c_fc(x))))
+        x = self.c_fc(x)
+        x = self.non_linearity(x)
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
+
+class Expert(nn.Module):
+    """ A single feed-forward network expert. """
+    def __init__(self, config:LLMconfig):
+        super().__init__()
+        self.expert = MLP(config)
+        
+    def forward(self, x):
+        return self.expert(x)
 
 class MoE(nn.Module):
     '''
@@ -451,24 +471,30 @@ class MoE(nn.Module):
         return y, complementary_loss
     
 class Block(nn.Module):
-    """ A single Transformer block combining attention and MLP/MoE. """
+    """ A single Transformer block combining attention and MLP. """
     def __init__(self, config:LLMconfig):
         super().__init__()
+        self.is_moe = config.moe
         self.attn = Attention(config)
-        self.moe  = MoE(config)
         self.ln1  = nn.LayerNorm(config.n_embd)
         self.ln2  = nn.LayerNorm(config.n_embd)
+        if config.moe:
+            self.moe = MoE(config)
+        else:
+            self.mlp = MLP(config)
 
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
         # Layer Norm + Attention
         attn_output, updated_kv_cache = self.attn.forward(self.ln1(x), freqs_cis, kv_cache, VAL_RUN)
         x = x + attn_output
-        
-        # MLP/MoE layer with residual connection
-        moe_output, aux_loss = self.moe(self.ln2(x))
-        x = x + moe_output
 
-        # Pass the aux_loss up for accumulation
+        if self.is_moe: 
+            moe_output, aux_loss = self.moe(self.ln2(x))
+            x = x + moe_output
+        else:
+            aux_loss = 0.0
+            x = x + self.mlp(self.ln2(x))
+
         return x, updated_kv_cache, aux_loss
 
 class LLM(nn.Module):
@@ -524,9 +550,35 @@ class LLM(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def get_num_params(self):
-        """Returns the number of parameters in the model."""
+        """Returns the total number of parameters and active parameters in the model."""
         n_params = sum(p.numel() for p in self.parameters())
-        return n_params
+        
+        active_params = 0
+
+        active_params += self.tkn_emb.weight.numel()      # embeddings
+        if self.config.pos_emb == 'learn': active_params += self.pos_emb.weight.numel()
+        active_params += self.transformer.ln_f.weight.numel() + self.transformer.ln_f.bias.numel()
+
+        for block in self.transformer.h:
+            active_params += sum(p.numel() for p in block.attn.parameters())   # ----|
+            active_params += sum(p.numel() for p in block.ln1.parameters())    #     |---> Always active
+            active_params += sum(p.numel() for p in block.ln2.parameters())    # ----|
+
+            if block.is_moe:
+
+                active_params += sum(p.numel() for p in block.moe.gate.parameters())                # ----|
+                for i in range(block.moe.n_shared):                                                 #     |---> Always active
+                    active_params += sum(p.numel() for p in block.moe.experts[i].parameters())      # ----|
+
+                if block.moe.n_routed > 0:
+                    # Calculate params for one routed expert, multiply by the number of active ones
+                    params_per_routed_expert = sum(p.numel() for p in block.moe.experts[block.moe.n_shared].parameters())
+                    active_params += block.moe.n_act_routed * params_per_routed_expert
+            
+            else: # In case a block is not MoE
+                active_params += sum(p.numel() for p in block.mlp.parameters())
+
+        return n_params, active_params
 
     def configure_optimizers(self, weight_decay, learning_rate, device):
         # start with all of the candidate parameters (that require grad)

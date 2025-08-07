@@ -11,7 +11,8 @@ from typing import Literal
 from dataclasses import dataclass
 from contextlib import nullcontext
 
-from model import LLM
+# from model import LLM
+from vectorised_moe import LLM
 
 # ______________DEVICE and DTYPE SETUP_________________
 torch.manual_seed(1729)
@@ -51,7 +52,7 @@ class LLMconfig:
 
     # Neural Network
     up_dim  : int
-    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'glu', 'swiglu', 'swish', 'mish', 'silu', 'selu','celu','tanh','sigmoid']
+    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu','tanh','sigmoid']
     dropout : float
     n_layer : int
 
@@ -80,14 +81,14 @@ ModelConfig = LLMconfig(
     # token params
     vocab_size = 50304, 
     block_size = 2**10,
-    n_embd = 256, 
+    n_embd = 768, 
     pos_emb = 'rope',
     
     # MoE
     moe = True,
 
     up_dim = 384, 
-    non_linearity = 'swiglu',  
+    non_linearity = 'gelu',  
     dropout=0.0,
     n_layer = 6,
 

@@ -73,7 +73,8 @@ class LLMconfig:
     non_linearity_map = {
             'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
             'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
-            'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh(), 'sigmoid': nn.Sigmoid()}
+            'glu' : nn.GLU(), 'sigmoid': nn.Sigmoid(),
+            'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh()}
 
     @staticmethod
     def apply_rotary_emb(x:torch.Tensor, freqs_cis:torch.Tensor)->torch.Tensor:
@@ -361,9 +362,14 @@ class MLP(nn.Module):
     """ A simple feed-forward network block. """
     def __init__(self, config: LLMconfig):
         super().__init__()
-        
+        non_linearity_map = {
+            'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
+            'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
+            'glu' : nn.GLU(), 'sigmoid': nn.Sigmoid(),
+            'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh()}
+
         self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
-        self.non_linearity = LLMconfig.non_linearity_map.get(config.non_linearity, nn.GELU())
+        self.non_linearity = non_linearity_map.get(config.non_linearity, nn.GELU())
         self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
         self.dropout = nn.Dropout(config.dropout)
         
@@ -387,8 +393,7 @@ class MoE(nn.Module):
     '''
     This class implements the DeepSeekMoE layer, featuring shared and routed experts.
     It uses an Auxiliary-Loss-Free load balancing strategy with a dynamic bias term.
-    This version uses vectorized operations.
-    Ref: https://arxiv.org/pdf/2412.19437
+    This version uses a memory-efficient vectorized implementation.
     '''
 
     def __init__(self, config: LLMconfig):
@@ -405,13 +410,14 @@ class MoE(nn.Module):
 
         self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_exp)])
         self.gate = nn.Linear(config.n_embd, self.n_routed, bias=False)
+        # The non-linearity is applied between the two einsum calls
         self.non_linearity = LLMconfig.non_linearity_map.get(config.non_linearity, nn.GELU())
 
         if config.aux_free:
             self.register_buffer('expert_bias', torch.zeros(self.n_routed))
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """ Forward pass for the DeepSeekMoE layer with Aux-Loss-Free Balancing. """
+        """ Forward pass for the DeepSeekMoE layer with a memory-efficient vectorized approach. """
         B, T, C = x.shape
         x_flat = x.view(-1, C)  # Shape: (B*T, C)
         n_tokens = x_flat.shape[0]
@@ -454,37 +460,50 @@ class MoE(nn.Module):
             router_probs = F.softmax(router_logits, dim=1)
             pi = router_probs.mean(dim=0)
             topk_logits, topk_indices = torch.topk(router_logits, self.n_act_routed, dim=1)
-            ones = torch.ones_like(topk_indices, dtype=torch.float)
-            fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
-            fi = fi_counts / n_tokens
+            
+            with torch.no_grad():
+                ones = torch.ones_like(topk_indices, dtype=torch.float)
+                fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
+                fi = fi_counts / n_tokens
+            
             aux_loss = self.config.coeff * self.n_routed * torch.sum(pi * fi)
             topk_gates = F.softmax(topk_logits, dim=1)  
 
         # ___________ DISPATCH ___________
-
-        routed_experts = self.experts[self.n_shared:]
-        fc1_weights = torch.stack([exp.expert.c_fc.weight for exp in routed_experts])    #(n_routed, up_dim, n_embd)
-        proj_weights = torch.stack([exp.expert.c_proj.weight for exp in routed_experts]) #(n_routed, n_embd, up_dim)
         
-        # Gather the weights for the experts selected by each token
-        active_fc1_weights = fc1_weights[topk_indices]      # (n_tokens, n_act_routed, up_dim, n_embd)
-        active_proj_weights = proj_weights[topk_indices]    # (n_tokens, n_act_routed, n_embd, up_dim)
+        # Create a sparse dispatch tensor: n=n_tokens, k=n_act_routed, e=n_routed
+        # This tensor will have a 1 at the location of the chosen expert for each token/slot
+        dispatch_tensor = torch.zeros(n_tokens, self.n_act_routed, self.n_routed, device=x.device, dtype=x.dtype)
+        dispatch_tensor.scatter_(2, topk_indices.unsqueeze(-1), 1)
 
-        # Einsum notation: n=token, k=expert, u=up_dim, c=n_embd
-        # operation: (n, k, u, c) @ (n, c, 1) -> (n, k, u, 1) -> (n, k, u)
-        intermediate_output = torch.einsum('nkuc,nc->nku', active_fc1_weights, x_flat)
+        # Now, combine the dispatch tensor with the gating values
+        gated_dispatch = dispatch_tensor * topk_gates.unsqueeze(-1)
+
+        # Get the expert weights
+        routed_experts = self.experts[self.n_shared:]
+        fc1_weights  = torch.stack([exp.expert.c_fc.weight for exp in routed_experts])   # (e, u, c)
+        proj_weights = torch.stack([exp.expert.c_proj.weight for exp in routed_experts]) # (e, c, u)
+
+        # Einsum notation: n=token, k=active_expert, e=routed_expert, c=n_embd, u=up_dim
+        
+        # Step 1: First MLP layer (FC1)
+        # Multiply input tokens by the weights of their assigned experts
+        # Equation: (n,k,e) * (n,c) * (e,u,c) -> (n,k,u)
+        intermediate_output = torch.einsum('nke,nc,euc->nku', gated_dispatch, x_flat, fc1_weights)
         intermediate_output = self.non_linearity(intermediate_output)
         
-        # operation: (n, k, c, u) @ (n, k, u, 1) -> (n, k, c, 1) -> (n, k, c)
-        final_expert_outputs = torch.einsum('nkcu,nku->nkc', active_proj_weights, intermediate_output)
-        
-        weighted_outputs = final_expert_outputs * topk_gates.unsqueeze(-1)
-        routed_output = torch.sum(weighted_outputs, dim=1) 
-        
+        # Step 2: Second MLP layer (Projection)
+        # Multiply intermediate output by the projection weights of their assigned experts and sum the results
+        # Equation: (n,k,u) * (e,c,u) -> (n,c)
+        # The gating is already applied in `gated_dispatch`. We just need to select the right proj_weights.
+        # We can do this with another `einsum` that reuses the dispatch tensor.
+        # This single line performs the projection, applies the gating, and sums over the k experts.
+        routed_output = torch.einsum('nku,ecu,nke->nc', intermediate_output, proj_weights, dispatch_tensor)
+
         # Combine to output
         y = (shared_output + routed_output).view(B, T, C)
         return y, aux_loss
-        
+
 class Block(nn.Module):
     """ A single Transformer block combining attention and MLP. """
     def __init__(self, config:LLMconfig):
