@@ -11,9 +11,6 @@ from typing import Literal
 from dataclasses import dataclass
 from contextlib import nullcontext
 
-# from model import LLM
-from vectorised_moe import LLM
-
 # ______________DEVICE and DTYPE SETUP_________________
 torch.manual_seed(1729)
 torch.cuda.manual_seed(1729)
@@ -22,8 +19,9 @@ torch.set_float32_matmul_precision('medium')   # Not sure if this has any effect
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 device_type = 'cuda' if 'cuda' in device else 'cpu'
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
-ctx = torch.amp.autocast(device_type=device_type, dtype=getattr(torch, dtype))
-scaler = torch.amp.GradScaler(enabled=(dtype == 'float16')) if device == 'cuda' else nullcontext()
+ctx = nullcontext()
+scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
+torch.set_default_dtype(torch.bfloat16)
 
 # ____________PARAMS-CONFIG_________________
 
@@ -58,7 +56,7 @@ class LLMconfig:
 
     # MoE
     moe : bool
-
+    vector : bool
     n_exp : int
     n_shared : int  
     n_act : int      ### INCLUDES THE SHARED EXPERTS
@@ -86,7 +84,7 @@ ModelConfig = LLMconfig(
     
     # MoE
     moe = True,
-
+    vector=False,
     up_dim = 384, 
     non_linearity = 'gelu',  
     dropout=0.0,
@@ -168,6 +166,7 @@ def parse_args():
     parser.add_argument('--aux_free',   action='store_true', help='Whether to use Aux Loss Free MoE')
     parser.add_argument('--eval',       action='store_true', help='Wheter to perform Evalutions once a while')
     parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
+    parser.add_argument('--vector',     action='store_true', help='Use vectorised implemetiation or not')
     parser.add_argument('--file_name', type=str, default=TrainingConfig.file_name, help='Name of the checkpoint to be saved')
 
     return parser.parse_args()
@@ -223,6 +222,21 @@ class DataLoader:
             self.current_position = 0
         return x,y
 
+#___________CREATE YOUR MODEL_____________
+
+if ModelConfig.vector:
+    from vectorised_moe import LLM
+else:
+    from model import LLM 
+
+model = LLM(ModelConfig).to(device)
+total, active = model.get_num_params()
+print(f"total parameters = {total:,}, acitive parameters = {active:,}")
+
+if TrainingConfig.compile :  
+    print("Using compiled model")
+    model = torch.compile(model)
+
 # ____________ UTIL FUNCTIONS _________________
 
 def get_lr(iter, TrainingConfig:Trainconfig):
@@ -265,14 +279,6 @@ T = ModelConfig.block_size       # sequence length
 assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
 grad_accum_steps = total_batch_size // (B * T)
 
-#___________CREATE YOUR MODEL_____________
-model = LLM(ModelConfig).to(device)
-total, active = model.get_num_params()
-print(f"total parameters = {total:,}, acitive parameters = {active:,}")
-
-if TrainingConfig.compile :  
-    print("Using compiled model")
-    model = torch.compile(model)
 
 #______________________________________________ TRAINING ______________________________________________
 

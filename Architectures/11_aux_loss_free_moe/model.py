@@ -425,33 +425,28 @@ class MoE(nn.Module):
         topk_original_logits = torch.gather(router_logits, 1, topk_indices) 
         topk_gates = F.softmax(topk_original_logits, dim=1)
 
-        # Calculate expert load and update bias during training only
-        if self.training:
-            with torch.no_grad(): # Ensure this logic doesn't affect gradients
-                ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
-                fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
-                fi = fi_counts / n_tokens
-                ideal_load = 1.0 / self.n_routed
+        # Calculate expert load (`fi`) for loss calculation
+        with torch.no_grad():
+            # Use the correct dtype from the input tensor to avoid mismatch
+            ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
+            fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
+            fi = fi_counts / n_tokens
 
+        # Update bias only during training
+        if self.training:
+            with torch.no_grad():
+                ideal_load = 1.0 / self.n_routed
                 overloaded_mask = fi > ideal_load
                 underloaded_mask = fi < ideal_load
-
                 self.expert_bias[overloaded_mask] -= self.config.gamma
                 self.expert_bias[underloaded_mask] += self.config.gamma
         
         # COMPLEMENTARY LOSS
         router_probs = F.softmax(router_logits, dim=1)
         pi = router_probs.mean(dim=0)
-        # We need fi for the loss, but only want to calculate it once.
-        # During inference, we can skip the calculation if not already done.
-        if not self.training:
-            ones = torch.ones_like(topk_indices, dtype=torch.float)
-            fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
-        fi = fi_counts / n_tokens
+        complementary_loss = self.config.alpha * self.n_routed * torch.sum(pi * fi)
 
-        complementary_loss = self.config.alpha * self.n_routed * torch.sum(pi*fi)
-
-        # Dispatch
+        # Dispatch tokens to experts
         routed_output = torch.zeros_like(x_flat)
         for i in range(self.n_routed):
             token_indices, topk_slot = (topk_indices == i).nonzero(as_tuple=True)
@@ -459,13 +454,13 @@ class MoE(nn.Module):
                 tokens_for_expert = x_flat[token_indices]
                 gates_for_expert = topk_gates[token_indices, topk_slot].unsqueeze(1)
 
-                # access the expert using an offset of `n_shared`
+                # Access the expert using an offset of `n_shared`
                 expert_output = self.experts[i + self.n_shared](tokens_for_expert)
                 
                 weighted_output = expert_output * gates_for_expert
                 routed_output.index_add_(0, token_indices, weighted_output)
         
-        # combine to output
+        # Combine shared and routed expert outputs
         y = (shared_output + routed_output).view(B, T, C)
         
         return y, complementary_loss
