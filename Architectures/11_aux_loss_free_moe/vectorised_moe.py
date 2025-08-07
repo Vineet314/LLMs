@@ -117,7 +117,7 @@ class GQA(nn.Module):
         self.attn_dropout  = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None):
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
         B, T, C = x.size()
         nh, nkvh, hs = self.config.n_head , self.config.n_kv_heads, self.head_size
 
@@ -187,13 +187,13 @@ class NaiveMHLA(nn.Module):
             self._k_absorbed_inference = (self.W_dq.weight.T @ self.W_uq.weight.T  @ self.W_uk.weight).view(nh, hs, n_kvl).unsqueeze(0)
             self._v_absorbed_inference = (self.W_uv.weight.T @ self.W_o.weight.T).view(n_kvl, nh, hs).transpose(0,1).unsqueeze(0)    
 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False) -> tuple[torch.Tensor, torch.Tensor]:
 
         B, T, C = x.size()
         nh, n_kvl, hs = self.config.n_head, self.config.kv_latent_dim, self.config.n_embd//self.config.n_head
 
         # k_eff and v_eff based on training or inference
-        if self.training:
+        if self.training or VAL_RUN:
             k_eff = (self.W_dq.weight.T @ self.W_uq.weight.T  @ self.W_uk.weight).view(nh, hs, n_kvl).unsqueeze(0)
             v_eff = (self.W_uv.weight.T @ self.W_o.weight.T).view(n_kvl, nh, hs).transpose(0,1).unsqueeze(0)
         else:
@@ -274,7 +274,7 @@ class FullMHLA(nn.Module):
             self._k_absorbed_inference = (self.W_uq.weight.view(1,nlq,nh,hs).transpose(1,2) @ self.W_uk.weight.view(1,nh,hs,nlkv))
             self._v_absorbed_inference = (self.W_uv.weight.T @ self.W_o.weight.T).view(nlkv, nh, hs).transpose(0,1).unsqueeze(0)    
 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None):
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
         B,T,C = x.size()
         nh,nlkv,nlq = self.config.n_head, self.config.kv_latent_dim, self.config.q_latent_dim
         hs = C//nh
@@ -285,7 +285,7 @@ class FullMHLA(nn.Module):
  #------------ NoPE--------------
 
         # Define the absorbed matrices
-        if self.training:
+        if self.training or VAL_RUN:
             k_eff = (self.W_uq.weight.view(1,nlq,nh,hs).transpose(1,2) @ self.W_uk.weight.view(1,nh,hs,nlkv))
             v_eff = (self.W_uv.weight.T @ self.W_o.weight.T).view(nlkv, nh, hs).transpose(0,1).unsqueeze(0)  
         else:
@@ -354,8 +354,8 @@ class Attention(nn.Module):
             else:
                 self.attn = FullMHLA(config)
                 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None):
-        return self.attn(x, freqs_cis, kv_cache)
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
+        return self.attn(x, freqs_cis, kv_cache, VAL_RUN)
 
 class MLP(nn.Module):
     """ A simple feed-forward network block. """
@@ -498,9 +498,9 @@ class Block(nn.Module):
         else:
             self.mlp = MLP(config)
 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None):
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
         # Layer Norm + Attention
-        attn_output, updated_kv_cache = self.attn.forward(self.ln1(x), freqs_cis, kv_cache)
+        attn_output, updated_kv_cache = self.attn.forward(self.ln1(x), freqs_cis, kv_cache, VAL_RUN)
         x = x + attn_output
 
         if self.is_moe: 
@@ -539,6 +539,8 @@ class LLM(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.tkn_emb.weight = self.lm_head.weight # weight tying
         self.apply(self._init_weights)
+
+        self.VAL_RUN = False
 
     def _precompute_freqs_cis(self):
         """Precomputes the rotary frequencies for RoPE."""
@@ -651,7 +653,7 @@ class LLM(nn.Module):
         total_aux_loss = 0.0
         for i, block in enumerate(self.transformer.h):
             # The block now returns an auxiliary loss from the MoE layer
-            x, updated_kv_cache, aux_loss = block(x, freqs_cis, kv_caches[i])
+            x, updated_kv_cache, aux_loss = block(x, freqs_cis, kv_caches[i], self.VAL_RUN)
             updated_kv_caches.append(updated_kv_cache)
             total_aux_loss += aux_loss
 

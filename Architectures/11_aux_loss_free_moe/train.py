@@ -1,16 +1,4 @@
-'''This script trains an LLM model based on the user's CLI inputs. 
-
-This code is highly inspired by Andrej Karpathy's work on his nanoGPT : https://github.com/karpathy/nanoGPT/
-
-This script is made to be run on a single GPU(preferred)/CPU. For a more sophisticated run involving distributed systems,
-checkout : https://github.com/Vineet314/Distributed-Pytorch/blob/master/LLMs/kaggle-train-v2.py
-
-To run this, either use a bash script, or run:
-python train.py --compile --max_iters=100 --attn='gqa' --pos_emb='sin'
-
-For details about arguments, see the LLMConfig and TrainConfig classes.'''
-
-# import warnings ; warnings.filterwarnings("ignore")
+import warnings ; warnings.filterwarnings("ignore")
 import os
 import math
 import torch
@@ -18,7 +6,7 @@ import argparse
 import tiktoken
 import requests
 
-from time import time
+from time import perf_counter
 from typing import Literal
 from dataclasses import dataclass
 from contextlib import nullcontext
@@ -31,8 +19,9 @@ torch.cuda.manual_seed(1729)
 torch.set_float32_matmul_precision('medium')   # Not sure if this has any effect when used with Auto Mixed Precision
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device_type = 'cuda' if 'cuda' in device else 'cpu'
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
-ctx = torch.amp.autocast(device_type=device, dtype=getattr(torch, dtype))
+ctx = torch.amp.autocast(device_type=device_type, dtype=getattr(torch, dtype))
 scaler = torch.amp.GradScaler(enabled=(dtype == 'float16')) if device == 'cuda' else nullcontext()
 
 # ____________PARAMS-CONFIG_________________
@@ -50,6 +39,7 @@ class Trainconfig:
     grad_clip : int
     compile : bool #= False if os.name != 'posix' else True
     save_model : bool
+    file_name : str
 
 @dataclass
 class LLMconfig:
@@ -59,20 +49,26 @@ class LLMconfig:
     n_embd : int
     pos_emb : str | Literal['learn','sin','rope']
 
-    # MoE
+    # Neural Network
     up_dim  : int
-    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu']
+    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'glu', 'swiglu', 'swish', 'mish', 'silu', 'selu','celu','tanh','sigmoid']
     dropout : float
     n_layer : int
+
+    # MoE
+    moe : bool
+
     n_exp : int
-    n_shared : int
-    n_act : int     ### INCLUDES THE SHARED EXPERTS
-    alpha : float
-    gamma : float
+    n_shared : int  
+    n_act : int      ### INCLUDES THE SHARED EXPERTS
+    coeff : float
+
+    aux_free : bool
+    alpha : float   # complementry aux loss coeff
+    gamma: float    # bias update speed
     
     # Attention
-    attn : str | Literal['mha', 'mqa', 'gqa', 'mla', 'fmla']
-    # kv_cache : bool
+    attn : str | Literal['mha', 'mqa', 'gqa', 'mla']
     n_head : int
     n_kv_heads : int 
         # Only for mla 
@@ -86,24 +82,32 @@ ModelConfig = LLMconfig(
     block_size = 2**10,
     n_embd = 256, 
     pos_emb = 'rope',
+    
     # MoE
+    moe = True,
+
     up_dim = 384, 
-    non_linearity = 'gelu',  
-    dropout=0.2,
+    non_linearity = 'swiglu',  
+    dropout=0.0,
     n_layer = 6,
-    n_shared = 2,
+
     n_exp = 16,
+    n_shared = 2,
     n_act = 8,        ### INCLUDES THE SHARED EXPERTS
+
+    coeff=0.01,
+    aux_free=True,
     alpha = 0.0001,
     gamma = 0.001,
+
     # Attention
     attn = 'mla', 
     n_head = 8,
-    n_kv_heads = 4, 
+    n_kv_heads=4,
     # MHLA
     q_latent_dim = 32, 
     kv_latent_dim = 32,
-    rope_head_dim = 16)
+    rope_head_dim = 16)              
 
 TrainingConfig = Trainconfig(
     
@@ -117,12 +121,15 @@ TrainingConfig = Trainconfig(
     warmup_steps = 100,
     grad_clip = 1.0,    
     compile = False if os.name != 'posix' else True,
-    save_model = True)
+    save_model = True,
+    file_name='llm_model')
 
-# ___________ CLI-OVERRIDE __________________
+# ___________ CLI-OVERRIDE__________________
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a simple LLM model')
+    # Training Parameters
+    # parser.add_argument('--dataset',       type=str,   default=TrainingConfig.dataset,       help='The data set to be used for training')
     parser.add_argument('--batch_size',    type=int,   default=TrainingConfig.batch_size,    help='Batch size for training')
     parser.add_argument('--max_iters',     type=int,   default=TrainingConfig.max_iters,     help='Maximum number of iterations for training')
     parser.add_argument('--eval_interval', type=int,   default=TrainingConfig.eval_interval, help='Interval for evaluation')
@@ -130,31 +137,37 @@ def parse_args():
     parser.add_argument('--learning_rate', type=float, default=TrainingConfig.learning_rate, help='Learning rate for training')
     parser.add_argument('--warmup_steps',  type=int,   default=TrainingConfig.warmup_steps,  help='Number of warmup steps for learning rate')
     parser.add_argument('--grad_clip',     type=float,  default=TrainingConfig.grad_clip,    help='Gradient Clip value')
-
+    # Model Parameters
     parser.add_argument('--vocab_size',  type=int,   default=ModelConfig.vocab_size,  help='Vocabulary size for the model')
     parser.add_argument('--block_size',  type=int,   default=ModelConfig.block_size,  help='Block size for the model')
     parser.add_argument('--n_embd',      type=int,   default=ModelConfig.n_embd,      help='Embedding dimension for the model')
     parser.add_argument('--pos_emb',     type=str,   default=ModelConfig.pos_emb,     help='Type of positional encoding (learn, sin, rope)')
+    parser.add_argument('--n_layer',     type=int,   default=ModelConfig.n_layer,     help='Number of layers in the model')
+    parser.add_argument('--dropout',     type=float, default=ModelConfig.dropout,     help='Dropout rate for the model')
+    # MLP Params
     parser.add_argument('--up_dim',      type=int,   default=ModelConfig.up_dim,      help='Up dimension for the Expert in the model')
     parser.add_argument('--non_linearity',type=str,   default=ModelConfig.non_linearity,help='Non-linearity for the Expert in the model')
+    # MoE Params
     parser.add_argument('--n_exp',       type=int,   default=ModelConfig.n_exp,       help='Number of Experts in the model')
     parser.add_argument('--n_shared',    type=int,   default=ModelConfig.n_shared,    help='Number of Shared Experts in the model')
     parser.add_argument('--n_act',       type=int,   default=ModelConfig.n_act,       help='Number of Active Experts in the model')
-    parser.add_argument('--alpha',       type=int,   default=ModelConfig.alpha,       help='Complementry Loss Coefficient for the MoE')
-    parser.add_argument('--gamma',       type=int,   default=ModelConfig.gamma,       help='Bias Update speed in Aux loss free MoE')
-    parser.add_argument('--dropout',     type=float, default=ModelConfig.dropout,     help='Dropout rate for the model')
-    parser.add_argument('--n_layer',     type=int,   default=ModelConfig.n_layer,     help='Number of layers in the model')
-    parser.add_argument('--attn',        type=str,   default=ModelConfig.attn,         help='Type of attention mechanism (mha, mqa, gqa, mla)')
+    parser.add_argument('--coeff',       type=float, default=ModelConfig.coeff,       help='Aux Loss Coefficient for the MoE if not using Aux Free')
+    parser.add_argument('--alpha',       type=float, default=ModelConfig.alpha,       help='Complementry Loss Coefficient for the MoE if using Aux Free')
+    parser.add_argument('--gamma',       type=float, default=ModelConfig.gamma,       help='Bias Update speed in Aux loss free MoE if using Aux Free')
+    # Attention Params
+    parser.add_argument('--attn',        type=str,   default=ModelConfig.attn,        help='Type of attention mechanism (mha, mqa, gqa, mla)')
     parser.add_argument('--n_head',      type=int,   default=ModelConfig.n_head,      help='Number of attention heads in the model')
     parser.add_argument('--n_kv_heads',  type=int,   default=ModelConfig.n_kv_heads,  help='Number of KV heads in the model (only for gqa)')
     parser.add_argument('--q_latent_dim',  type=int, default=ModelConfig.q_latent_dim,help='Query latent dimension (only for mla)')
     parser.add_argument('--kv_latent_dim', type=int, default=ModelConfig.kv_latent_dim,help='KV latent dimension (only for mla)')
     parser.add_argument('--rope_head_dim', type=int, default=ModelConfig.rope_head_dim,help='RoPE head dimension (only for mla)')
     
-    parser.add_argument('--total_batch_size_str', type=str, default='2**11', help='Total batch size for training passed in as a string expression')
-    # parser.add_argument('--compile',    action='store_true', help='Whether to compile the model with torch.compile()')
+    parser.add_argument('--total_batch_size_str', type=str, default=str(TrainingConfig.total_batch_size), help='Total batch size for training passed in as a string expression')
+    parser.add_argument('--moe',        action='store_true', help='Whether to use Mixture of Experts in the model')
+    parser.add_argument('--aux_free',   action='store_true', help='Whether to use Aux Loss Free MoE')
     parser.add_argument('--eval',       action='store_true', help='Wheter to perform Evalutions once a while')
     parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
+    parser.add_argument('--file_name', type=str, default=TrainingConfig.file_name, help='Name of the checkpoint to be saved')
 
     return parser.parse_args()
 
@@ -229,17 +242,18 @@ def get_lr(iter, TrainingConfig:Trainconfig):
         return min_lr + coeff * (max_lr - min_lr)
 
 @torch.no_grad()
-def estimate_loss(model:LLM, TrainingConfig:Trainconfig, eval_loader:DataLoader):
+def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader, val_loader:DataLoader):
     out = {}
-    model.eval()
-    for split in ['train', 'val']:
+    model.eval() ; model.VAL_RUN = True
+    for split, loader in [('train', train_loader), ('val', val_loader)]:
         losses = torch.zeros(TrainingConfig.eval_iters)
         for k in range(TrainingConfig.eval_iters):
-            X, Y = eval_loader.next_batch()
-            _, loss, _ = model(X, Y)
+            X, Y = loader.next_batch() # Data is now moved to device in next_batch()
+            with ctx:
+                _, loss, _ = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
-    model.train()
+    model.train(); model.VAL_RUN = False
     return out
 
 #___________GRAD_ACCUM SETUP_____________
@@ -252,7 +266,8 @@ grad_accum_steps = total_batch_size // (B * T)
 
 #___________CREATE YOUR MODEL_____________
 model = LLM(ModelConfig).to(device)
-print(f"total parameters = {model.get_num_params():,}")
+total, active = model.get_num_params()
+print(f"total parameters = {total:,}, acitive parameters = {active:,}")
 
 if TrainingConfig.compile :  
     print("Using compiled model")
@@ -262,23 +277,29 @@ if TrainingConfig.compile :
 
 optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
 train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size)
-eval_loader  = None
+eval_loader  = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size)
 
+train_loss_stats = []
+valrun_val_loss_stats = []
+valrun_train_loss_stats = []
 for iter in range(TrainingConfig.max_iters+1):
-    t0 = time()
+    t0 = perf_counter()
 
     lr = get_lr(iter, TrainingConfig) 
     for param_grp in optimizer.param_groups:
         param_grp['lr'] = lr
     
     optimizer.zero_grad(set_to_none=True)
-    if TrainingConfig.eval:
-        pass
-        # every once in a while evaluate the loss on train and val sets
-        # if iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters - 1:
-        #     losses = estimate_loss()
-        #     print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-
+    a,b = 0,0
+    if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
+        a = perf_counter()
+        losses = estimate_loss(model, TrainingConfig, train_loader, eval_loader)
+        valrun_val_loss_stats.append(losses['val'])
+        valrun_train_loss_stats.append(losses['train'])
+        b = perf_counter()
+        print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
+        t0 = b
+    
     for micro_step in range(grad_accum_steps):
 
         x,y = train_loader.next_batch()
@@ -286,8 +307,9 @@ for iter in range(TrainingConfig.max_iters+1):
 
         with ctx:
             _, loss, _ = model(x,y) #logits, loss, kv cache
-            loss = loss/grad_accum_steps
+            loss:torch.Tensor = loss/grad_accum_steps
 
+        train_loss_stats.append(loss.item())
         scaler.scale(loss).backward()
 
     if TrainingConfig.grad_clip != 0.0:
@@ -298,8 +320,12 @@ for iter in range(TrainingConfig.max_iters+1):
     scaler.update()    
 
     if "cuda" in device : torch.cuda.synchronize()
-    dt  = (time()-t0)*1000
+    dt  = (perf_counter()-t0)*1000
     print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps}")
 
 if TrainingConfig.save_model:
-    torch.save(model.state_dict(), 'llm_model.pt')
+    # might do in-training checkpointing later
+    loss_stats = {'train':train_loss_stats, 'valrun_val':valrun_val_loss_stats, 'valrun_train':valrun_train_loss_stats}
+    checkpoint = {'config': ModelConfig, 'train_config':TrainingConfig, 'model_state': model.state_dict(), 'iters':iter, 'losses':loss_stats} 
+    torch.save(checkpoint, TrainingConfig.file_name+'.pt')
+    print("Model and config saved to {}.pt".format(TrainingConfig.file_name))
