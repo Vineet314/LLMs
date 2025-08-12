@@ -195,10 +195,6 @@ class DataLoader:
             y = y.pin_memory().to(self.device, non_blocking=True)
         return x, y
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-train_loader = DataLoader(TrainingConfig.batch_size, ModelConfig.block_size, os.path.join('data', TrainingConfig.dataset, 'train.bin'), device)
-val_loader   = DataLoader(TrainingConfig.batch_size, ModelConfig.block_size, os.path.join('data', TrainingConfig.dataset, 'val.bin'), device)
-
 # _______________ LR Schedule _______________
 def get_lr(iter, TrainingConfig:Trainconfig):
     max_lr = TrainingConfig.learning_rate
@@ -249,7 +245,7 @@ with open(args.ds_config, "w") as f:
     json.dump(ds_config, f, indent=2)
 
 # _______________ Model Init _______________
-model = LLM(ModelConfig).to(device)
+model = LLM(ModelConfig)
 total, active = model.get_num_params()
 print(f"total parameters = {total:,}, acitive parameters = {active:,}")
 if TrainingConfig.compile:
@@ -263,15 +259,20 @@ model_engine, optimizer, _, _ = deepspeed.initialize(
     config=args.ds_config)
 
 # _______________ Training Loop _______________
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+train_loader = DataLoader(model_engine.train_micro_batch_size_per_gpu, ModelConfig.block_size, os.path.join('data', TrainingConfig.dataset, 'train.bin'), device)
+val_loader   = DataLoader(model_engine.train_micro_batch_size_per_gpu, ModelConfig.block_size, os.path.join('data', TrainingConfig.dataset, 'val.bin'), device)
+
 x, y = train_loader.next_batch()
 train_loss_stats = []
 valrun_val_loss_stats = []
 valrun_train_loss_stats = []
 
-for it in range(TrainingConfig.max_iters+1):
+for iter in range(TrainingConfig.max_iters+1):
     t0 = perf_counter()
     
-    lr = get_lr(it, TrainingConfig)
+    lr = get_lr(iter, TrainingConfig)
     for pg in optimizer.param_groups:
         pg['lr'] = lr
 
@@ -288,7 +289,7 @@ for it in range(TrainingConfig.max_iters+1):
 
     if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
         a = perf_counter()
-        losses = estimate_loss(model, TrainingConfig, train_loader, val_loader, ds_config)
+        losses = estimate_loss(model_engine, TrainingConfig, train_loader, val_loader, ds_config)
         valrun_val_loss_stats.append(losses['val'])
         valrun_train_loss_stats.append(losses['train'])
         b = perf_counter()
@@ -297,7 +298,7 @@ for it in range(TrainingConfig.max_iters+1):
 
     if "cuda" in device : torch.cuda.synchronize()
     dt = (perf_counter() - t0) * 1000
-    print(f"step {it} | loss: {loss.item():.4f} | dt: {dt:.2f} ms | accum: {model_engine.gradient_accumulation_steps()}")
+    print(f"step {iter} | loss: {loss.item():.4f} | dt: {dt:.2f} ms | accum: {model_engine.gradient_accumulation_steps()}")
 
 # _______________ Save _______________
 if TrainingConfig.save_model:
