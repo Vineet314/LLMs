@@ -198,30 +198,48 @@ elif ModelConfig.attn == 'mla':
 
 class DataLoader:
     def __init__(self, B, T, file_path, device):
-        self.B = B ; self.T = T
+        self.B = B
+        self.T = T
         self.file_path = file_path
         self.device = device
         self.device_type = 'cuda' if 'cuda' in device else 'cpu'
 
+        # Keep the memory-mapped file open persistently
+        self.tokens = np.memmap(self.file_path, dtype=np.uint16, mode='r')
+        self.N = len(self.tokens)
+        if self.B * self.T + 1 > self.N:
+            raise ValueError(f"Batch size {B} and block size {T} are too large for dataset of length {self.N}")
+
     def next_batch(self):
-        '''credits to Andrej Karpathy's NanoGPT'''
+        """
+        Returns (x, y) where:
+        - x is (B, T) input tokens
+        - y is (B, T) target tokens (shifted by one)
+        """
         B, T = self.B, self.T
-        tokens = np.memmap(self.file_path, dtype=np.uint16, mode='r')
 
-        start_ix = torch.randint(len(tokens) - (B * T + 1), (1,)).item()
-        # Slice the memory-mapped array. This is where the OS reads from disk.
-        buf = tokens[start_ix : start_ix + B * T + 1]
-        # .astype(np.int64) is important as torch.LongTensor is 64-bit
-        full_tokens = torch.from_numpy(buf.astype(np.int64))
+        # Sample B random starting positions independently
+        start_indices = torch.randint(0, self.N - T - 1, (B,))
 
-        x = full_tokens[:-1].view(B, T)
-        y = full_tokens[1:].view(B, T)
-        
+        # Gather sequences
+        x_list = []
+        y_list = []
+        for start in start_indices:
+            seq = self.tokens[start : start + T + 1].astype(np.int64)
+            x_list.append(seq[:-1])
+            y_list.append(seq[1:])
+
+        # Stack into tensors
+        x = torch.tensor(np.stack(x_list), dtype=torch.long)
+        y = torch.tensor(np.stack(y_list), dtype=torch.long)
+
+        # Move to device (with pinned memory if CUDA)
         if self.device_type == 'cuda':
-            # Pin memory which allows us to move them to GPU asynchronously (non_blocking=True)
-            x, y = x.pin_memory().to(self.device, non_blocking=True), y.pin_memory().to(self.device, non_blocking=True)
+            x = x.pin_memory().to(self.device, non_blocking=True)
+            y = y.pin_memory().to(self.device, non_blocking=True)
         else:
-            x, y = x.to(self.device), y.to(self.device)
+            x = x.to(self.device)
+            y = y.to(self.device)
         return x, y
 
 data_dir = os.path.join('data', TrainingConfig.dataset)
