@@ -29,3 +29,4 @@ tests/*.html
 tests/*.pdf
 # stats.ipynb
 
+models/
