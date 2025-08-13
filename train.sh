@@ -6,7 +6,7 @@
 DATASET='tinystories'
 TOTAL_BATCH_SIZE_STR="2**12"
 BATCH_SIZE=4
-MAX_ITERS=3000
+MAX_ITERS=600
 LEARNING_RATE=3e-4
 WARMUP_STEPS=100
 GRAD_CLIP=1.0
@@ -24,7 +24,7 @@ DROPOUT=0.01
 POS_EMB="rope" # Can be 'learn', 'sin', 'rope'
 
 UP_DIM=1536
-NON_LINEARITY="swiglu" # Example: 'relu', 'gelu', 'silu'
+NON_LINEARITY="gelu" # Example: 'relu', 'gelu', 'silu'
 
 ATTN="mla" # Can be 'mha', 'mqa', 'gqa', 'mla'
 N_HEAD=8

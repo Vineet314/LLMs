@@ -100,6 +100,7 @@ TrainingConfig = Trainconfig(
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a simple LLM model')
     # Training Parameters
+    parser.add_argument('--local_rank', type=int, default=0, help='local rank passed from distributed launcher')
     parser.add_argument('--dataset',       type=str,   default=TrainingConfig.dataset,       help='The data set to be used for training')
     # parser.add_argument('--batch_size',    type=int,   default=TrainingConfig.batch_size,    help='Batch size for training')
     parser.add_argument('--max_iters',     type=int,   default=TrainingConfig.max_iters,     help='Maximum number of iterations for training')
@@ -141,7 +142,8 @@ def parse_args():
     # DeepSpeed config path + overrides
     parser.add_argument('--ds_config', type=str, default="ds_config.json")
     parser.add_argument('--offload', action='store_true', help="Enable CPU offloading")
-
+    parser = deepspeed.add_config_arguments(parser)
+    
     return parser.parse_args()
 
 args = parse_args()
@@ -216,17 +218,12 @@ def estimate_loss(model_engine, TrainingConfig:Trainconfig, train_loader:DataLoa
     model_engine.eval()
     model_engine.module.VAL_RUN = True  # Access the underlying nn.Module
 
-    dtype = torch.bfloat16 if ds_config["bf16"]["enabled"] else torch.float16
-    device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-    ctx = torch.autocast(device_type=device_type, dtype=dtype)
-
     for split, loader in [('train', train_loader), ('val', val_loader)]:
         losses = torch.zeros(TrainingConfig.eval_iters)
         for k in range(TrainingConfig.eval_iters):
             X, Y = loader.next_batch()
-            with ctx:
-                _, loss, _ = model_engine(X, Y)
+            # with ctx:
+            _, loss, _ = model_engine(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
 
@@ -261,8 +258,8 @@ model_engine, optimizer, _, _ = deepspeed.initialize(
 # _______________ Training Loop _______________
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-train_loader = DataLoader(model_engine.train_micro_batch_size_per_gpu, ModelConfig.block_size, os.path.join('data', TrainingConfig.dataset, 'train.bin'), device)
-val_loader   = DataLoader(model_engine.train_micro_batch_size_per_gpu, ModelConfig.block_size, os.path.join('data', TrainingConfig.dataset, 'val.bin'), device)
+train_loader = DataLoader(model_engine.train_micro_batch_size_per_gpu(), ModelConfig.block_size, os.path.join('data', TrainingConfig.dataset, 'train.bin'), device)
+val_loader   = DataLoader(model_engine.train_micro_batch_size_per_gpu(), ModelConfig.block_size, os.path.join('data', TrainingConfig.dataset, 'val.bin'), device)
 
 x, y = train_loader.next_batch()
 train_loss_stats = []
@@ -276,8 +273,8 @@ for iter in range(TrainingConfig.max_iters+1):
     for pg in optimizer.param_groups:
         pg['lr'] = lr
 
-    with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16 if ds_config["bf16"]["enabled"] else torch.float16):
-        _, loss, _ = model_engine(x, y)
+    # with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16 if ds_config["bf16"]["enabled"] else torch.float16):
+    _, loss, _ = model_engine(x, y)
 
     x, y = train_loader.next_batch()
     model_engine.backward(loss)

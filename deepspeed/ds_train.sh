@@ -2,7 +2,7 @@
 
 # --- Training Configuration Arguments ---
 DATASET='tinystories'
-MAX_ITERS=3000
+MAX_ITERS=600
 LEARNING_RATE=3e-4
 WARMUP_STEPS=100
 GRAD_CLIP=1.0
@@ -21,7 +21,7 @@ DROPOUT=0.01
 POS_EMB="rope" # Can be 'learn', 'sin', 'rope'
 
 UP_DIM=1536
-NON_LINEARITY="swiglu" # Example: 'relu', 'gelu', 'silu'
+NON_LINEARITY="gelu" # Example: 'relu', 'gelu', 'silu'
 
 ATTN="mla" # Can be 'mha', 'mqa', 'gqa', 'mla'
 N_HEAD=8
@@ -41,13 +41,11 @@ COEFF=0.01
 
 # --- DeepSpeed Config ---
 DS_CONFIG="ds_config.json"
-CPU_OFFLOAD=true
+CPU_OFFLOAD=flase
 
 # --- Run Training ---
 deepspeed ds_train.py \
     --dataset $DATASET \
-    --total_batch_size $TOTAL_BATCH_SIZE \
-    --batch_size $BATCH_SIZE \
     --max_iters $MAX_ITERS \
     --learning_rate $LEARNING_RATE \
     --warmup_steps $WARMUP_STEPS \
