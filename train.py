@@ -27,7 +27,7 @@ scaler = torch.amp.GradScaler(enabled=(dtype == 'float16')) if device == 'cuda' 
 
 @dataclass
 class Trainconfig:
-    dataset : str | Literal['shakespeare', 'tinystories', 'openwebtext']
+    dataset : str | Literal['shakespeare', 'tinystories', 'fineweb']
     total_batch_size : int
     batch_size : int
     max_iters : int

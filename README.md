@@ -1,6 +1,8 @@
 # Large Language Models (LLMs)
 
-Build a custom LLM, and then train it. For now, training can be done on TinyStories dataset or Tiny shakespeare data, since most of these codes can be run on a single GPU.
+Build a custom LLM, and then train it. 
+
+For now, training can be done one of 3 datsets: Tiny shakespeare (~304k tokens), TinyStories(~470M tokens), FineWeb-Edu (10B tokens).
 
 Supported Model Architectures:
    - ***Positional Encodings*** : set `pos_emb` to one of `learn`, `sin`, `rope`.  Default : `rope` 

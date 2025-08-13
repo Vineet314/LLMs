@@ -19,14 +19,13 @@ num_proc = os.cpu_count() // 2
 # best number might be different from num_proc above as it also depends on NW speed.
 # it is better than 1 usually though
 num_proc_load_dataset = num_proc
+remote_name = "sample-10BT"
 
 enc = tiktoken.get_encoding("gpt2")
 
 if __name__ == '__main__':
-    # takes 54GB in huggingface .cache dir, about 8M documents (8,013,769)
-    dataset = load_dataset("openwebtext", num_proc=num_proc_load_dataset)
+    dataset = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name, num_proc=num_proc_load_dataset)
 
-    # owt by default only contains the 'train' split, so create a test split
     split_dataset = dataset["train"].train_test_split(test_size=0.0005, seed=2357, shuffle=True)
     split_dataset['val'] = split_dataset.pop('test') # rename the test split to val
 
@@ -56,8 +55,7 @@ if __name__ == '__main__':
         process,
         remove_columns=['text'],
         desc="tokenizing the splits",
-        num_proc=num_proc,
-    )
+        num_proc=num_proc,)
 
     # concatenate all the ids in each dataset into one large file we can use for training
     for split, dset in tokenized.items():
@@ -76,10 +74,6 @@ if __name__ == '__main__':
             arr[idx : idx + len(arr_batch)] = arr_batch
             idx += len(arr_batch)
         arr.flush()
-
-    # train.bin is ~17GB, val.bin ~8.5MB
-    # train has ~9B tokens (9,035,582,198)
-    # val has ~4M tokens (4,434,897)
 
     # to read the bin files later, e.g. with numpy:
     # m = np.memmap('train.bin', dtype=np.uint16, mode='r')
