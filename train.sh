@@ -3,7 +3,7 @@
 # Train a single model.
 
 # --- Training Configuration Arguments ---
-DATASET='tinystories'
+DATASET='fineweb'
 TOTAL_BATCH_SIZE_STR="2**12"
 BATCH_SIZE=4
 MAX_ITERS=600

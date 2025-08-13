@@ -5,8 +5,9 @@ import torch
 import argparse
 import numpy as np
 
-from time import perf_counter
+from pathlib import Path
 from typing import Literal
+from time import perf_counter
 from dataclasses import dataclass
 from contextlib import nullcontext
 
@@ -243,6 +244,7 @@ class DataLoader:
         return x, y
 
 data_dir = os.path.join('data', TrainingConfig.dataset)
+print(f"Using Dataset {Path(data_dir).stem}")
 train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path=os.path.join(data_dir, "train.bin"), device=device)
 val_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path=os.path.join(data_dir, "val.bin"), device=device)
 
