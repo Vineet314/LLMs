@@ -12,7 +12,7 @@ These parameters control the training loop, optimization, and evaluation process
 
 | Parameter | Default | Type | Description |
 | :--- | :--- | :--- | :--- |
-| `--dataset` | `'tinystories'` | str | The dataset to be used for training. Options: `'shakespeare'`, `'tinystories'`. |
+| `--dataset` | `'tinystories'` | str | The dataset to be used for training. Options: `'shakespeare'`, `'tinystories'`,`fineweb`. |
 | `--total_batch_size_str`| `'2**11'` (`2048`) | str | Total number of tokens to process in one optimization step, passed as a string expression. This determines the gradient accumulation steps. |
 | `--batch_size` | `2` | int | The micro-batch size. Number of sequences processed in parallel on the GPU before a gradient accumulation step. |
 | `--max_iters` | `2500` | int | The total number of training iterations (optimization steps) to run. |
