@@ -1,11 +1,7 @@
 #!/bin/bash
 
-# Train a single model.
-
 # --- Training Configuration Arguments ---
-DATASET='fineweb'
-TOTAL_BATCH_SIZE_STR="2**12"
-BATCH_SIZE=4
+DATASET='tinystories'
 MAX_ITERS=600
 LEARNING_RATE=3e-4
 WARMUP_STEPS=100
@@ -15,6 +11,7 @@ EVAL_INTERVAL=250
 EVAL_ITERS=30
 SAVE_MODEL=false
 FILE_NAME="llm_model"
+
 # --- Model Configuration Arguments ---
 N_LAYER=6
 N_EMBD=384
@@ -28,10 +25,10 @@ NON_LINEARITY="gelu" # Example: 'relu', 'gelu', 'silu'
 
 ATTN="mla" # Can be 'mha', 'mqa', 'gqa', 'mla'
 N_HEAD=8
-N_KV_HEADS=4 # Only relevant if ATTN is 'gqa'
-Q_LATENT_DIM=64 # Only relevant if ATTN is 'mla'
-KV_LATENT_DIM=64 # Only relevant if ATTN is 'mla'
-ROPE_HEAD_DIM=48 # Only relevant if POS_EMB is 'rope'
+N_KV_HEADS=4
+Q_LATENT_DIM=64
+KV_LATENT_DIM=64
+ROPE_HEAD_DIM=48
 
 MOE=false
 N_EXP=16
@@ -40,13 +37,15 @@ N_ACT=4
 AUX_FREE=true
 ALPHA=0.0001
 GAMMA=0.001
-CEOFF=0.01
+COEFF=0.01
 
-# Construct the command
-python train.py \
+# --- DeepSpeed Config ---
+DS_CONFIG="ds_config.json"
+CPU_OFFLOAD=flase
+
+# --- Run Training ---
+deepspeed ds_train.py \
     --dataset $DATASET \
-    --total_batch_size_str $TOTAL_BATCH_SIZE_STR \
-    --batch_size $BATCH_SIZE \
     --max_iters $MAX_ITERS \
     --learning_rate $LEARNING_RATE \
     --warmup_steps $WARMUP_STEPS \
@@ -72,9 +71,11 @@ python train.py \
     --n_act $N_ACT \
     --alpha $ALPHA \
     --gamma $GAMMA \
-    --coeff $CEOFF \
+    --coeff $COEFF \
     --file_name $FILE_NAME \
+    --ds_config $DS_CONFIG \
     $( [ "$SAVE_MODEL" = true ] && echo "--save_model" ) \
     $( [ "$EVAL" = true ] && echo "--eval" ) \
     $( [ "$MOE" = true ] && echo "--moe" ) \
-    $( [ "$AUX_FREE" = true ] && echo "--aux_free" ) 
+    $( [ "$AUX_FREE" = true ] && echo "--aux_free" ) \
+    $( [ "$CPU_OFFLOAD" = true ] && echo "--offload" )
