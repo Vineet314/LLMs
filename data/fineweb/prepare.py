@@ -24,7 +24,7 @@ remote_name = "sample-10BT"
 enc = tiktoken.get_encoding("gpt2")
 
 if __name__ == '__main__':
-    dataset = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name, num_proc=num_proc_load_dataset)
+    dataset = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name)
 
     split_dataset = dataset["train"].train_test_split(test_size=0.0005, seed=2357, shuffle=True)
     split_dataset['val'] = split_dataset.pop('test') # rename the test split to val
