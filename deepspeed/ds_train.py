@@ -258,8 +258,8 @@ model_engine, optimizer, _, _ = deepspeed.initialize(
 # _______________ Training Loop _______________
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-train_loader = DataLoader(model_engine.train_micro_batch_size_per_gpu(), ModelConfig.block_size, os.path.join('data', TrainingConfig.dataset, 'train.bin'), device)
-val_loader   = DataLoader(model_engine.train_micro_batch_size_per_gpu(), ModelConfig.block_size, os.path.join('data', TrainingConfig.dataset, 'val.bin'), device)
+train_loader = DataLoader(model_engine.train_micro_batch_size_per_gpu(), ModelConfig.block_size, os.path.join('../data', TrainingConfig.dataset, 'train.bin'), device)
+val_loader   = DataLoader(model_engine.train_micro_batch_size_per_gpu(), ModelConfig.block_size, os.path.join('../data', TrainingConfig.dataset, 'val.bin'), device)
 
 x, y = train_loader.next_batch()
 train_loss_stats = []
