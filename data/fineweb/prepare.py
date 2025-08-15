@@ -1,79 +1,88 @@
-'''
-This code was taken directly from https://github.com/karpathy/nanoGPT/blob/master/data/openwebtext/prepare.py
-'''
-
-# saves the openwebtext dataset to a binary file for training. following was helpful:
-# https://github.com/HazyResearch/flash-attention/blob/main/training/src/datamodules/language_modeling_hf.py
+'''This script prepares the requested dataset. Needs to be run only once for a dataset.'''
 
 import os
-from tqdm import tqdm
-import numpy as np
 import tiktoken
-from datasets import load_dataset # huggingface datasets
+import numpy as np
+from tqdm import tqdm
+from datasets import load_dataset
 
-# number of workers in .map() call
-# good number to use is ~order number of cpu cores // 2
-num_proc = os.cpu_count() // 2
-
-# number of workers in load_dataset() call
-# best number might be different from num_proc above as it also depends on NW speed.
-# it is better than 1 usually though
-num_proc_load_dataset = num_proc
+n_proc = 4 + os.cpu_count() // 2   # 4 + 16//2 = 12
+DATASET_NAME = "HuggingFaceFW/fineweb-edu"
 remote_name = "sample-10BT"
+EOT_TOKEN_ID = 50256 # End-of-text token for gpt2
 
-enc = tiktoken.get_encoding("gpt2")
+def tokenize_and_save():
+    """
+    Downloads, tokenizes, and saves the requested dataset.
+    This version uses the `map` method for efficient tokenization.
+    """
 
-if __name__ == '__main__':
-    dataset = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name, num_proc=num_proc_load_dataset)
+    print(f"Loading dataset: {DATASET_NAME}")
+    dataset = load_dataset(DATASET_NAME, name=remote_name)
 
-    split_dataset = dataset["train"].train_test_split(test_size=0.0005, seed=2357, shuffle=True)
-    split_dataset['val'] = split_dataset.pop('test') # rename the test split to val
+    split_dataset = dataset['train'].train_test_split(test_size=0.01, seed=1729, shuffle=True)
+    split_dataset['val'] = split_dataset.pop('test')  # Rename 'test' to 'val'
 
-    # this results in:
-    # >>> split_dataset
-    # DatasetDict({
-    #     train: Dataset({
-    #         features: ['text'],
-    #         num_rows: 8009762
-    #     })
-    #     val: Dataset({
-    #         features: ['text'],
-    #         num_rows: 4007
-    #     })
-    # })
+    enc = tiktoken.get_encoding("gpt2")
 
-    # we now want to tokenize the dataset. first define the encoding function (gpt2 bpe)
-    def process(example):
-        ids = enc.encode_ordinary(example['text']) # encode_ordinary ignores any special tokens
-        ids.append(enc.eot_token) # add the end of text token, e.g. 50256 for gpt2 bpe
-        # note: I think eot should be prepended not appended... hmm. it's called "eot" though...
-        out = {'ids': ids, 'len': len(ids)}
-        return out
+    def tokenize(example):
+        """Tokenization function to be applied with `map`."""
+        ids = enc.encode_ordinary(example['text'])
+        ids.append(EOT_TOKEN_ID)  # Add End-of-Text token
+        return {'ids': ids, 'len': len(ids)}
 
-    # tokenize the dataset
+    # Tokenize parallel
     tokenized = split_dataset.map(
-        process,
+        tokenize,
         remove_columns=['text'],
-        desc="tokenizing the splits",
-        num_proc=num_proc,)
+        desc="Tokenizing",
+        num_proc=n_proc)
 
-    # concatenate all the ids in each dataset into one large file we can use for training
+    # Save the tokenized datasets to binary files using np.memmap
+    for split, dset in tokenized.items():
+        arr_len = np.sum(dset['len'], dtype=np.uint64)  # total tokens
+        file_path = f'{split}.bin'
+        dtype = np.uint16  # GPT-2 tokenizer has 50257 tokens
+
+        print(f"Saving {split} split to {file_path} ({arr_len:,} tokens)")
+
+        # Create a memmap array on disk
+        mmapped_arr = np.memmap(file_path, dtype=dtype, mode='w+', shape=(arr_len,))
+
+        # Write into the memmap in chunks without holding all in RAM
+        idx = 0
+        for ids in tqdm(dset['ids'], desc=f"Writing {split}", total=len(dset)):
+            ids_arr = np.array(ids, dtype=dtype)
+            mmapped_arr[idx:idx + len(ids_arr)] = ids_arr
+            idx += len(ids_arr)
+
+        # Ensure data is flushed to disk
+        mmapped_arr.flush()
+        del mmapped_arr  # Close the memmap file
+
+        print(f"Saved {arr_len:,} tokens to {file_path}")
+
+    '''
+    # if you have a crap ton of RAM: 
+    # Save the tokenized datasets to binary files
     for split, dset in tokenized.items():
         arr_len = np.sum(dset['len'], dtype=np.uint64)
-        filename = os.path.join(os.path.dirname(__file__), f'{split}.bin')
-        dtype = np.uint16 # (can do since enc.max_token_value == 50256 is < 2**16)
-        arr = np.memmap(filename, dtype=dtype, mode='w+', shape=(arr_len,))
-        total_batches = 1024
+        file_path = f'{split}.bin'
+        dtype = np.uint16  # GPT-2 tokenizer has 50257 tokens
 
-        idx = 0
-        for batch_idx in tqdm(range(total_batches), desc=f'writing {filename}'):
-            # Batch together samples for faster write
-            batch = dset.shard(num_shards=total_batches, index=batch_idx, contiguous=True).with_format('numpy')
-            arr_batch = np.concatenate(batch['ids'])
-            # Write into mmap
-            arr[idx : idx + len(arr_batch)] = arr_batch
-            idx += len(arr_batch)
-        arr.flush()
+        print(f"Saving {split} split to {file_path}")
 
-    # to read the bin files later, e.g. with numpy:
-    # m = np.memmap('train.bin', dtype=np.uint16, mode='r')
+        # Convert all token lists into one flat NumPy array
+        all_tokens = np.concatenate([np.array(ids, dtype=dtype) for ids in dset['ids']])
+
+        # Single write
+        with open(file_path, 'wb') as f:
+            f.write(all_tokens.tobytes())
+
+        print(f"Saved {arr_len:,} tokens to {file_path}")
+    '''
+
+
+if __name__ == "__main__":
+    tokenize_and_save()
+    print("Data preparation complete.")
