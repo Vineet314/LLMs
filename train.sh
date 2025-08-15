@@ -3,37 +3,37 @@
 # Train a single model.
 
 # --- Training Configuration Arguments ---
-DATASET='tinystories'
-TOTAL_BATCH_SIZE_STR="2**12"
-BATCH_SIZE=4
-MAX_ITERS=3000
-LEARNING_RATE=3e-4
-WARMUP_STEPS=100
-GRAD_CLIP=1.0
+DATASET='fineweb'    # Has 10B tokens
+TOTAL_BATCH_SIZE_STR="2**13" # Makes 4 grad_acccum_steps 
+BATCH_SIZE=2
+MAX_ITERS=150000   # Tokens covered = tokens/step * num_steps = 8192 * 150,000 = 1.2B << 10B
+LEARNING_RATE=7e-5  # to avoid overflow
+WARMUP_STEPS=500
+GRAD_CLIP=0.9
 EVAL=true
-EVAL_INTERVAL=250
-EVAL_ITERS=30
+EVAL_INTERVAL=100
+EVAL_ITERS=10
 SAVE_MODEL=true
 FILE_NAME="llm_model"
 # --- Model Configuration Arguments ---
-N_LAYER=6
-N_EMBD=384
+N_LAYER=12
+N_EMBD=1024
 VOCAB_SIZE=50304
-BLOCK_SIZE=1024
+BLOCK_SIZE=1024   # total tokens per training step = seq_len*batch*grad_accum_steps = 1024*2*4 = 8192  
 DROPOUT=0.01
 POS_EMB="rope" # Can be 'learn', 'sin', 'rope'
 
-UP_DIM=1536
+UP_DIM=768
 NON_LINEARITY="swiglu" # Example: 'relu', 'gelu', 'silu'
 
 ATTN="mla" # Can be 'mha', 'mqa', 'gqa', 'mla'
 N_HEAD=8
 N_KV_HEADS=4 # Only relevant if ATTN is 'gqa'
-Q_LATENT_DIM=64 # Only relevant if ATTN is 'mla'
-KV_LATENT_DIM=64 # Only relevant if ATTN is 'mla'
-ROPE_HEAD_DIM=48 # Only relevant if POS_EMB is 'rope'
+Q_LATENT_DIM=256 # Only relevant if ATTN is 'mla'
+KV_LATENT_DIM=256 # Only relevant if ATTN is 'mla'
+ROPE_HEAD_DIM=128 # Only relevant if POS_EMB is 'rope'
 
-MOE=false
+MOE=true
 N_EXP=16
 N_SHARED=1
 N_ACT=4
