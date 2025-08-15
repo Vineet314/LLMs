@@ -31,6 +31,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torch.utils.checkpoint import checkpoint
+
 from typing import Literal
 from dataclasses import dataclass 
 
@@ -69,6 +71,8 @@ class LLMconfig:
     q_latent_dim  : int | None
     kv_latent_dim : int | None
     rope_head_dim : int | None
+
+    act_recomp : bool  # more of a training param, but the best way to integrate that is to just add it here
 
     @staticmethod
     def apply_rotary_emb(x:torch.Tensor, freqs_cis:torch.Tensor)->torch.Tensor:
@@ -358,37 +362,37 @@ class Attention(nn.Module):
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
         return self.attn(x, freqs_cis, kv_cache, VAL_RUN)
 
-class SwiGLU(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.linear_1 = nn.Linear(dim,dim)
-        self.linear_2 = nn.Linear(dim,dim)
-
-    def forward(self, x):
-        output = self.linear_1(x)
-        swish  = output * torch.sigmoid(output)
-        swiglu = swish * self.linear_2(x)
-
-        return swiglu
-
 class MLP(nn.Module):
     """ A simple feed-forward network block. """
     def __init__(self, config: LLMconfig):
         super().__init__()
-        non_linearity_map = {
-            'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
-            'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
-            'glu' : nn.GLU(), 'sigmoid': nn.Sigmoid(), 'swiglu': SwiGLU(config.n_embd),
-            'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh()}
-
-        self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
-        self.non_linearity = non_linearity_map.get(config.non_linearity, nn.GELU())
-        self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
-        self.dropout = nn.Dropout(config.dropout)
+        self.non_linearity = config.non_linearity.lower()
         
+        if self.non_linearity == 'swiglu':
+            # One projection, then split into two halves
+            self.c_fc = nn.Linear(config.n_embd, 2 * config.up_dim, bias=False)
+            self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+        else:
+            non_linearity_map = {
+                'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
+                'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
+                'glu' : nn.GLU(), 'sigmoid': nn.Sigmoid(),
+                'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh()
+            }
+            self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
+            self.non_linearity_func = non_linearity_map.get(self.non_linearity, nn.GELU())
+            self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+
+        self.dropout = nn.Dropout(config.dropout)
+
     def forward(self, x):
-        x = self.c_fc(x)
-        x = self.non_linearity(x)
+        if self.non_linearity == 'swiglu':
+            x1, x2 = self.c_fc(x).chunk(2, dim=-1)
+            x = F.silu(x1) * x2
+        else:
+            x = self.c_fc(x)
+            x = self.non_linearity_func(x)
+        
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
@@ -669,7 +673,8 @@ class LLM(nn.Module):
         total_aux_loss = 0.0
         for i, block in enumerate(self.transformer.h):
             # The block now returns an auxiliary loss from the MoE layer
-            x, updated_kv_cache, aux_loss = block(x, freqs_cis, kv_caches[i], self.VAL_RUN)
+            if not self.config.act_recomp: x, updated_kv_cache, aux_loss = block(x, freqs_cis, kv_caches[i], self.VAL_RUN)
+            else :                         x, updated_kv_cache, aux_loss = checkpoint(block, x, freqs_cis, kv_caches[i], self.VAL_RUN)
             updated_kv_caches.append(updated_kv_cache)
             total_aux_loss += aux_loss
 

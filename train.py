@@ -40,6 +40,7 @@ class Trainconfig:
     compile : bool #= False if os.name != 'posix' else True
     save_model : bool
     file_name : str
+    act_recomp : bool
 
 @dataclass
 class LLMconfig:
@@ -76,6 +77,24 @@ class LLMconfig:
     kv_latent_dim : int | None
     rope_head_dim : int | None
 
+    act_recomp : bool
+
+TrainingConfig = Trainconfig(
+    dataset='tinystories',
+    total_batch_size = 2**11,
+    batch_size = 2**1, # how many independent sequences will we process in parallel?
+    max_iters = 2500,
+    eval = False,
+    eval_interval=100,
+    eval_iters=100,
+    learning_rate = 3e-4,
+    warmup_steps = 100,
+    grad_clip = 1.0,    
+    compile = False if os.name != 'posix' else True,
+    save_model = True,
+    file_name='llm_model',
+    act_recomp=True)
+
 ModelConfig = LLMconfig(
     # token params
     vocab_size = 50304, 
@@ -107,22 +126,9 @@ ModelConfig = LLMconfig(
     # MHLA
     q_latent_dim = 32, 
     kv_latent_dim = 32,
-    rope_head_dim = 16)              
-
-TrainingConfig = Trainconfig(
-    dataset='tinystories',
-    total_batch_size = 2**11,
-    batch_size = 2**1, # how many independent sequences will we process in parallel?
-    max_iters = 2500,
-    eval = False,
-    eval_interval=100,
-    eval_iters=100,
-    learning_rate = 3e-4,
-    warmup_steps = 100,
-    grad_clip = 1.0,    
-    compile = False if os.name != 'posix' else True,
-    save_model = True,
-    file_name='llm_model')
+    rope_head_dim = 16,
+    
+    act_recomp=TrainingConfig.act_recomp)    # Link the activation recomputation from the TRaining params           
 
 # ___________ CLI-OVERRIDE__________________
 
@@ -137,6 +143,8 @@ def parse_args():
     parser.add_argument('--learning_rate', type=float, default=TrainingConfig.learning_rate, help='Learning rate for training')
     parser.add_argument('--warmup_steps',  type=int,   default=TrainingConfig.warmup_steps,  help='Number of warmup steps for learning rate')
     parser.add_argument('--grad_clip',     type=float,  default=TrainingConfig.grad_clip,    help='Gradient Clip value')
+    parser.add_argument('--act_recomp', action='store_true', help='Whether to use (selective) activation recomputation')
+    
     # Model Parameters
     parser.add_argument('--vocab_size',  type=int,   default=ModelConfig.vocab_size,  help='Vocabulary size for the model')
     parser.add_argument('--block_size',  type=int,   default=ModelConfig.block_size,  help='Block size for the model')
