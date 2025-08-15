@@ -94,7 +94,7 @@ TrainingConfig = Trainconfig(
     compile = False if os.name != 'posix' else True,
     save_model = True,
     file_name='llm_model',
-    act_recomp=True)
+    act_recomp=False)   # Default to False
 
 ModelConfig = LLMconfig(
     # token params
@@ -186,6 +186,8 @@ for key, value in vars(args).items():
     if key == 'total_batch_size_str':
         value = eval(value)
         setattr(TrainingConfig, 'total_batch_size', value)
+    elif key == 'act_recomp':
+        setattr(ModelConfig, key, value)
     else:
         if isinstance(value, str) and key !='non_linearity':
             value = value.lower().strip()

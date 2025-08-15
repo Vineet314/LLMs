@@ -561,6 +561,7 @@ class LLM(nn.Module):
         self.apply(self._init_weights)
 
         self.VAL_RUN=False
+        if config.act_recomp: print("Using Activation Recomputation")
 
     def _precompute_freqs_cis(self):
         """Precomputes the rotary frequencies for RoPE."""
@@ -630,7 +631,7 @@ class LLM(nn.Module):
         # Create AdamW optimizer and use the fused version if it is available
         try:
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=True)
-            # print("Using Fused AdamW")
+            print("Using Fused AdamW")
         except:
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate)
         return optimizer
@@ -673,8 +674,11 @@ class LLM(nn.Module):
         total_aux_loss = 0.0
         for i, block in enumerate(self.transformer.h):
             # The block now returns an auxiliary loss from the MoE layer
-            if not self.config.act_recomp: x, updated_kv_cache, aux_loss = block(x, freqs_cis, kv_caches[i], self.VAL_RUN)
-            else :                         x, updated_kv_cache, aux_loss = checkpoint(block, x, freqs_cis, kv_caches[i], self.VAL_RUN)
+            if not self.config.act_recomp: 
+                x, updated_kv_cache, aux_loss = block(x, freqs_cis, kv_caches[i], self.VAL_RUN)
+            else : 
+                x, updated_kv_cache, aux_loss = checkpoint(block, x, freqs_cis, kv_caches[i], self.VAL_RUN)
+
             updated_kv_caches.append(updated_kv_cache)
             total_aux_loss += aux_loss
 

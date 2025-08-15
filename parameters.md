@@ -24,6 +24,7 @@ These parameters control the training loop, optimization, and evaluation process
 | `--eval_iters` | `100` | int | The number of batches to use when estimating the evaluation loss. |
 | `--save_model` | `True` | bool | If `True`, saves the model's state dictionary to a checkpoint file after training. |
 | `--file_name` | `'llm_model'` | str | The name of the checkpoint file to be saved. |
+| `--act_recomp` | `False` | bool | If `True`, recomputes the activation during the backward pass to save memory. |
 
 ## Model Configuration (`LLMconfig`)
 
