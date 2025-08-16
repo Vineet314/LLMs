@@ -350,10 +350,13 @@ for iter in range(TrainingConfig.max_iters+1):
 
     scaler.step(optimizer)
     scaler.update()    
-
-    if "cuda" in device : torch.cuda.synchronize()
+    mem = 0
+    if "cuda" in device : 
+        torch.cuda.synchronize()
+        mem = torch.cuda.memory_reserved()
+    
     dt  = (perf_counter()-t0)*1000
-    print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps}")
+    print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps} | GPU RAM: {mem/1024**3:.2f}GB")
 
 if TrainingConfig.save_model:
     # might do in-training checkpointing later
