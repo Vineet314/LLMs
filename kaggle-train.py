@@ -34,6 +34,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from typing import Literal
 from dataclasses import dataclass 
@@ -73,6 +74,8 @@ class LLMconfig:
     q_latent_dim  : int | None
     kv_latent_dim : int | None
     rope_head_dim : int | None
+
+    act_recomp : bool  # more of a training param, but the best way to integrate that is to just add it here
 
     @staticmethod
     def apply_rotary_emb(x:torch.Tensor, freqs_cis:torch.Tensor)->torch.Tensor:
@@ -116,7 +119,7 @@ class GQA(nn.Module):
         self.attn_dropout  = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None):
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
         B, T, C = x.size()
         nh, nkvh, hs = self.config.n_head , self.config.n_kv_heads, self.head_size
 
@@ -186,13 +189,13 @@ class NaiveMHLA(nn.Module):
             self._k_absorbed_inference = (self.W_dq.weight.T @ self.W_uq.weight.T  @ self.W_uk.weight).view(nh, hs, n_kvl).unsqueeze(0)
             self._v_absorbed_inference = (self.W_uv.weight.T @ self.W_o.weight.T).view(n_kvl, nh, hs).transpose(0,1).unsqueeze(0)    
 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False) -> tuple[torch.Tensor, torch.Tensor]:
 
         B, T, C = x.size()
         nh, n_kvl, hs = self.config.n_head, self.config.kv_latent_dim, self.config.n_embd//self.config.n_head
 
         # k_eff and v_eff based on training or inference
-        if self.training:
+        if self.training or VAL_RUN: # HIDDEN IN PLAIN SIGHT : THIS BUG TOOK ~16 HRS TO DEBUG
             k_eff = (self.W_dq.weight.T @ self.W_uq.weight.T  @ self.W_uk.weight).view(nh, hs, n_kvl).unsqueeze(0)
             v_eff = (self.W_uv.weight.T @ self.W_o.weight.T).view(n_kvl, nh, hs).transpose(0,1).unsqueeze(0)
         else:
@@ -217,10 +220,13 @@ class NaiveMHLA(nn.Module):
 
         attn:torch.Tensor = (q @ k_eff @ c_kv.transpose(1,2).unsqueeze(1)) / math.sqrt(hs)
 
-        query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
-        key_indices   = torch.arange(T_full, device=x.device).unsqueeze(0)
-        mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
-        attn = attn.masked_fill(mask == 0, float('-inf'))
+        # query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
+        # key_indices   = torch.arange(T_full, device=x.device).unsqueeze(0)
+        # mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
+        # attn = attn.masked_fill(mask == 0, float('-inf'))
+        
+        mask = torch.triu(torch.ones(T, T_full, device=x.device, dtype=torch.bool), diagonal=T_full - T + 1)
+        attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
         
         attn = self.dropout(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
 
@@ -273,7 +279,7 @@ class FullMHLA(nn.Module):
             self._k_absorbed_inference = (self.W_uq.weight.view(1,nlq,nh,hs).transpose(1,2) @ self.W_uk.weight.view(1,nh,hs,nlkv))
             self._v_absorbed_inference = (self.W_uv.weight.T @ self.W_o.weight.T).view(nlkv, nh, hs).transpose(0,1).unsqueeze(0)    
 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None):
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
         B,T,C = x.size()
         nh,nlkv,nlq = self.config.n_head, self.config.kv_latent_dim, self.config.q_latent_dim
         hs = C//nh
@@ -284,7 +290,7 @@ class FullMHLA(nn.Module):
  #------------ NoPE--------------
 
         # Define the absorbed matrices
-        if self.training:
+        if self.training or VAL_RUN:  # HIDDEN IN PLAIN SIGHT : THIS BUG TOOK ~16 HRS TO DEBUG
             k_eff = (self.W_uq.weight.view(1,nlq,nh,hs).transpose(1,2) @ self.W_uk.weight.view(1,nh,hs,nlkv))
             v_eff = (self.W_uv.weight.T @ self.W_o.weight.T).view(nlkv, nh, hs).transpose(0,1).unsqueeze(0)  
         else:
@@ -322,10 +328,13 @@ class FullMHLA(nn.Module):
 
         attn = (attn_c + attn_r)/math.sqrt(hs+dhr)
 
-        query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
-        key_indices = torch.arange(T_full, device=x.device).unsqueeze(0)
-        mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
-        attn = attn.masked_fill(mask == 0, float('-inf')) 
+        # query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
+        # key_indices = torch.arange(T_full, device=x.device).unsqueeze(0)
+        # mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
+        # attn = attn.masked_fill(mask == 0, float('-inf')) 
+
+        mask = torch.triu(torch.ones(T, T_full, device=x.device, dtype=torch.bool), diagonal=T_full - T + 1)
+        attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
 
         attn = self.dropout(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
 
@@ -353,26 +362,40 @@ class Attention(nn.Module):
             else:
                 self.attn = FullMHLA(config)
                 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None):
-        return self.attn(x, freqs_cis, kv_cache)
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
+        return self.attn(x, freqs_cis, kv_cache, VAL_RUN)
 
 class MLP(nn.Module):
     """ A simple feed-forward network block. """
     def __init__(self, config: LLMconfig):
         super().__init__()
-        non_linearity_map = {
-            'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
-            'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
-            'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh(), 'sigmoid': nn.Sigmoid()}
-
-        self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
-        self.non_linearity = non_linearity_map.get(config.non_linearity, nn.GELU())
-        self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
-        self.dropout = nn.Dropout(config.dropout)
+        self.non_linearity = config.non_linearity.lower()
         
+        if self.non_linearity == 'swiglu':
+            # One projection, then split into two halves
+            self.c_fc = nn.Linear(config.n_embd, 2 * config.up_dim, bias=False)
+            self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+        else:
+            non_linearity_map = {
+                'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
+                'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
+                'glu' : nn.GLU(), 'sigmoid': nn.Sigmoid(),
+                'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh()
+            }
+            self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
+            self.non_linearity_func = non_linearity_map.get(self.non_linearity, nn.GELU())
+            self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+
+        self.dropout = nn.Dropout(config.dropout)
+
     def forward(self, x):
-        x = self.c_fc(x)
-        x = self.non_linearity(x)
+        if self.non_linearity == 'swiglu':
+            x1, x2 = self.c_fc(x).chunk(2, dim=-1)
+            x = F.silu(x1) * x2
+        else:
+            x = self.c_fc(x)
+            x = self.non_linearity_func(x)
+        
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
@@ -438,29 +461,19 @@ class MoE(nn.Module):
             topk_gates = F.softmax(topk_original_logits, dim=1)
 
             # Calculate expert load and update bias during training only
+            with torch.no_grad():
+                ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
+                fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
+                fi = fi_counts / n_tokens
+
             if self.training:
-                with torch.no_grad(): # Ensure this logic doesn't affect gradients
-                    ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
-                    fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
-                    fi = fi_counts / n_tokens
+                with torch.no_grad():
                     ideal_load = 1.0 / self.n_routed
+                    delta = ideal_load - fi 
+                    self.expert_bias += (self.config.gamma*delta)
 
-                    overloaded_mask = fi > ideal_load
-                    underloaded_mask = fi < ideal_load
-
-                    self.expert_bias[overloaded_mask] -= self.config.gamma
-                    self.expert_bias[underloaded_mask] += self.config.gamma
-            
-            # COMPLEMENTARY LOSS
             router_probs = F.softmax(router_logits, dim=1)
             pi = router_probs.mean(dim=0)
-            # We need fi for the loss, but only want to calculate it once.
-            # During inference, we can skip the calculation if not already done.
-            if not self.training:
-                ones = torch.ones_like(topk_indices, dtype=torch.float)
-                fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
-            fi = fi_counts / n_tokens
-            # complementary_loss
             aux_loss = self.config.alpha * self.n_routed * torch.sum(pi*fi)
 
         else:
@@ -500,6 +513,7 @@ class Block(nn.Module):
     def __init__(self, config:LLMconfig):
         super().__init__()
         self.is_moe = config.moe
+        self.act_recomp = config.act_recomp
         self.attn = Attention(config)
         self.ln1  = nn.LayerNorm(config.n_embd)
         self.ln2  = nn.LayerNorm(config.n_embd)
@@ -508,11 +522,15 @@ class Block(nn.Module):
         else:
             self.mlp = MLP(config)
 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None):
-        # Layer Norm + Attention
-        attn_output, updated_kv_cache = self.attn.forward(self.ln1(x), freqs_cis, kv_cache)
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
+        if self.act_recomp:
+            attn_output, updated_kv_cache = checkpoint(self.attn, self.ln1(x), freqs_cis, kv_cache, VAL_RUN, use_reentrant=False)
+        else:
+            attn_output, updated_kv_cache = self.attn(self.ln1(x), freqs_cis, kv_cache, VAL_RUN)
+        
         x = x + attn_output
 
+        # NO checkpointing the MoE/MLP part -> memory grows O(T^2) for attn, O(T) for MoE, +scary looking error when we add MoE in checkpoint  
         if self.is_moe: 
             moe_output, aux_loss = self.moe(self.ln2(x))
             x = x + moe_output
@@ -521,6 +539,7 @@ class Block(nn.Module):
             x = x + self.mlp(self.ln2(x))
 
         return x, updated_kv_cache, aux_loss
+
 
 class LLM(nn.Module):
     """ A simple Large language model """
@@ -549,6 +568,10 @@ class LLM(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.tkn_emb.weight = self.lm_head.weight # weight tying
         self.apply(self._init_weights)
+
+        self.VAL_RUN=False
+        self.print_act_recomp=config.act_recomp
+        self.print_fused_adamw=False 
 
     def _precompute_freqs_cis(self):
         """Precomputes the rotary frequencies for RoPE."""
@@ -618,7 +641,7 @@ class LLM(nn.Module):
         # Create AdamW optimizer and use the fused version if it is available
         try:
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=True)
-            # print("Using Fused AdamW")
+            self.print_fused_adamw = True
         except:
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate)
         return optimizer
@@ -660,8 +683,7 @@ class LLM(nn.Module):
         updated_kv_caches = []
         total_aux_loss = 0.0
         for i, block in enumerate(self.transformer.h):
-            # The block now returns an auxiliary loss from the MoE layer
-            x, updated_kv_cache, aux_loss = block(x, freqs_cis, kv_caches[i])
+            x, updated_kv_cache, aux_loss = block(x, freqs_cis, kv_caches[i], self.VAL_RUN)            
             updated_kv_caches.append(updated_kv_cache)
             total_aux_loss += aux_loss
 
@@ -735,6 +757,7 @@ import os
 import argparse
 import tiktoken
 import requests
+import numpy as np
 
 from time import perf_counter
 
@@ -744,12 +767,24 @@ from torch.distributed import init_process_group, destroy_process_group
 assert torch.cuda.is_available()
 assert torch.cuda.device_count() > 1
 
-# ______________DEVICE and DTYPE SETUP_________________
-torch.manual_seed(1729)
-torch.cuda.manual_seed(1729)
-torch.set_float32_matmul_precision('high')   # Not sure if this has any effect when used with Auto Mixed Precision
+# ______________DEVICE, DTYPE, DDP SETUP_________________
 
-dtype = 'float16'
+init_process_group(backend='nccl')
+ddp_rank = int(os.environ['RANK'])
+ddp_local_rank = int(os.environ['LOCAL_RANK'])
+ddp_world_size = int(os.environ['WORLD_SIZE'])
+device = f"cuda:{ddp_local_rank}"
+master_process = ddp_rank == 0
+if master_process : print(f"DDP_WORLD_SIZE = {ddp_world_size}")
+
+torch.cuda.set_device(device)
+torch.manual_seed(1729 + ddp_rank)         # offset the seed
+torch.cuda.manual_seed(1729 + ddp_rank)    # offset the seed
+torch.set_float32_matmul_precision('high') # Not sure if this has any effect when used with Auto Mixed Precision
+torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+
+dtype = 'float16' # if not torch.cuda.is_bf16_supported else 'bfloat16'
 ctx = torch.amp.autocast(device_type="cuda", dtype=getattr(torch, dtype))
 scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
 
@@ -757,6 +792,7 @@ scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
 
 @dataclass
 class Trainconfig:
+    dataset : str | Literal['shakespeare', 'tinystories', 'fineweb']
     total_batch_size : int
     batch_size : int
     max_iters : int
@@ -766,26 +802,45 @@ class Trainconfig:
     learning_rate : float
     warmup_steps : int
     grad_clip : int
+    compile : bool #= False if os.name != 'posix' else True
     save_model : bool
+    file_name : str
+    act_recomp : bool
+
+TrainingConfig = Trainconfig(
+    dataset='shakespeare',
+    total_batch_size = 2**11,
+    batch_size = 2**1, # how many independent sequences will we process in parallel?
+    max_iters = 2500,
+    eval = False,
+    eval_interval=100,
+    eval_iters=100,
+    learning_rate = 3e-4,
+    warmup_steps = 100,
+    grad_clip = 1.0,    
+    compile = False if os.name != 'posix' else True,
+    save_model = True,
+    file_name='llm_model',
+    act_recomp=False)   # Default to False
 
 ModelConfig = LLMconfig(
     # token params
     vocab_size = 50304, 
     block_size = 2**10,
-    n_embd = 768, 
+    n_embd = 256, 
     pos_emb = 'rope',
     
     # MoE
     moe = True,
 
     up_dim = 512, 
-    non_linearity = 'gelu',  
-    dropout=0.15,
-    n_layer = 9,
+    non_linearity = 'swiglu',  
+    dropout=0.0,
+    n_layer = 6,
 
-    n_exp = 32,
+    n_exp = 8,
     n_shared = 1,
-    n_act = 8,        ### INCLUDES THE SHARED EXPERTS
+    n_act = 4,        ### INCLUDES THE SHARED EXPERTS
 
     coeff=0.01,
     aux_free=True,
@@ -797,27 +852,18 @@ ModelConfig = LLMconfig(
     n_head = 8,
     n_kv_heads=4,
     # MHLA
-    q_latent_dim = 256, 
-    kv_latent_dim = 256,
-    rope_head_dim = 256)              
-
-TrainingConfig = Trainconfig(
-    total_batch_size = 2**13,
-    batch_size = 2**2, # how many independent sequences will we process in parallel?
-    max_iters = 2500,
-    eval = False,
-    eval_interval=100,
-    eval_iters=100,
-    learning_rate = 3e-4,
-    warmup_steps = 100,
-    grad_clip = 1.0,    
-    save_model = True)
+    q_latent_dim = 32, 
+    kv_latent_dim = 32,
+    rope_head_dim = 16,
+    
+    act_recomp=TrainingConfig.act_recomp)
 
 # ___________ CLI-OVERRIDE__________________
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a simple LLM model')
     # Training Parameters
+    parser.add_argument('--dataset',       type=str,   default=TrainingConfig.dataset,       help='The data set to be used for training')
     parser.add_argument('--batch_size',    type=int,   default=TrainingConfig.batch_size,    help='Batch size for training')
     parser.add_argument('--max_iters',     type=int,   default=TrainingConfig.max_iters,     help='Maximum number of iterations for training')
     parser.add_argument('--eval_interval', type=int,   default=TrainingConfig.eval_interval, help='Interval for evaluation')
@@ -825,6 +871,8 @@ def parse_args():
     parser.add_argument('--learning_rate', type=float, default=TrainingConfig.learning_rate, help='Learning rate for training')
     parser.add_argument('--warmup_steps',  type=int,   default=TrainingConfig.warmup_steps,  help='Number of warmup steps for learning rate')
     parser.add_argument('--grad_clip',     type=float,  default=TrainingConfig.grad_clip,    help='Gradient Clip value')
+    parser.add_argument('--act_recomp', action='store_true', help='Whether to use (selective) activation recomputation')
+    
     # Model Parameters
     parser.add_argument('--vocab_size',  type=int,   default=ModelConfig.vocab_size,  help='Vocabulary size for the model')
     parser.add_argument('--block_size',  type=int,   default=ModelConfig.block_size,  help='Block size for the model')
@@ -855,6 +903,7 @@ def parse_args():
     parser.add_argument('--aux_free',   action='store_true', help='Whether to use Aux Loss Free MoE')
     parser.add_argument('--eval',       action='store_true', help='Wheter to perform Evalutions once a while')
     parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
+    parser.add_argument('--file_name', type=str, default=TrainingConfig.file_name, help='Name of the checkpoint to be saved')
 
     return parser.parse_args()
 
@@ -864,6 +913,8 @@ for key, value in vars(args).items():
     if key == 'total_batch_size_str':
         value = eval(value)
         setattr(TrainingConfig, 'total_batch_size', value)
+    elif key == 'act_recomp':
+        setattr(ModelConfig, key, value)
     else:
         if isinstance(value, str) and key !='non_linearity':
             value = value.lower().strip()
@@ -883,34 +934,80 @@ elif ModelConfig.attn == 'mla':
 
 # _______________ DATASET _________________
 
-# Using The Tiny Shakespeare dataset for demo
+def tokenize_and_save():
+    url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()  # This will raise an error for bad responses (4xx or 5xx)
+        text = response.text
+    except requests.exceptions.RequestException as e:
+        print(f"Error downloading the dataset: {e}")
+        return # Exit the function if download fails
+
+    enc = tiktoken.get_encoding("gpt2")
+    tokens = enc.encode(text)
+    tokens = np.array(tokens, dtype=np.uint16)
+
+    n = int(0.9 * len(tokens))
+    train_data = tokens[:n]
+    val_data = tokens[n:]
+
+    data_splits = {'train': train_data, 'val': val_data}
+    for split, data in data_splits.items():
+        file_path = f'{split}.bin'
+        with open(file_path, 'wb') as f:
+            f.write(data.tobytes())
+
+tokenize_and_save() # Using The Tiny Shakespeare dataset for demo
+
 class DataLoader:
-    def __init__(self, B, T, process_rank, num_proc):
+    def __init__(self, B, T, file_path, device):
         self.B = B
         self.T = T
-        self.proc_rank = process_rank
-        self.num_proc  = num_proc
+        self.file_path = file_path
+        self.device = device
+        self.device_type = 'cuda'
 
-        enc = tiktoken.get_encoding('gpt2')
-        # training data
-        url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-        text = requests.get(url).text
-        tokens = enc.encode(text)
-        self.tokens = torch.tensor(tokens, dtype=torch.long)
+        # Keep the memory-mapped file open persistently
+        self.tokens = np.memmap(self.file_path, dtype=np.uint16, mode='r')
+        self.N = len(self.tokens)
+        if self.B * self.T + 1 > self.N:
+            raise ValueError(f"Batch size {B} and block size {T} are too large for dataset of length {self.N}")
 
-        self.current_position = self.B* self.T * self.proc_rank
-    
     def next_batch(self):
+        """
+        Returns (x, y) where:
+        - x is (B, T) input tokens
+        - y is (B, T) target tokens (shifted by one)
+        """
         B, T = self.B, self.T
-        buf = self.tokens[self.current_position: self.current_position+(B*T+1)]
-        x = (buf[:-1]).view(B,T)
-        y = (buf[1:]).view(B,T)
-        # advance the position
-        self.current_position += B*T*self.num_proc
 
-        if self.current_position + (B*T*self.num_proc+1)  > len(self.tokens):
-            self.current_position = B*T*self.proc_rank
-        return x,y
+        # Sample B random starting positions independently
+        start_indices = torch.randint(0, self.N - T - 1, (B,))
+
+        # Gather sequences
+        x_list = []
+        y_list = []
+        for start in start_indices:
+            seq = self.tokens[start : start + T + 1].astype(np.int64)
+            x_list.append(seq[:-1])
+            y_list.append(seq[1:])
+
+        # Stack into tensors
+        x = torch.from_numpy(np.stack(x_list)).long()
+        y = torch.from_numpy(np.stack(y_list)).long()
+
+        # Move to device (with pinned memory if CUDA)
+        if self.device_type == 'cuda':
+            x = x.pin_memory().to(self.device, non_blocking=True)
+            y = y.pin_memory().to(self.device, non_blocking=True)
+        else:
+            x = x.to(self.device)
+            y = y.to(self.device)
+        return x, y
+
+train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path="train.bin", device=device)
+val_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path="val.bin", device=device)
 
 # ____________ UTIL FUNCTIONS _________________
 
@@ -930,11 +1027,11 @@ def get_lr(iter, TrainingConfig:Trainconfig):
         decay_ratio = min(decay_ratio, 1.0)  # ensure it does
         coeff = 0.5 * (1 + math.cos(math.pi * decay_ratio))
         return min_lr + coeff * (max_lr - min_lr)
-    
+
 @torch.no_grad()
 def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader, val_loader:DataLoader):
     out = {}
-    model.eval()
+    model.eval() ; model.VAL_RUN = True
     for split, loader in [('train', train_loader), ('val', val_loader)]:
         losses = torch.zeros(TrainingConfig.eval_iters)
         for k in range(TrainingConfig.eval_iters):
@@ -943,19 +1040,8 @@ def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader
                 _, loss, _ = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
-    model.train()
+    model.train(); model.VAL_RUN = False
     return out
-
-# _______________DDP setup_________________
-
-init_process_group(backend='nccl')
-ddp_rank = int(os.environ['RANK'])
-ddp_local_rank = int(os.environ['LOCAL_RANK'])
-ddp_world_size = int(os.environ['WORLD_SIZE'])
-device = f"cuda:{ddp_local_rank}"
-torch.cuda.set_device(device)
-master_process = ddp_rank == 0
-if master_process : print(f"DDP_WORLD_SIZE = {ddp_world_size}")
 
 #___________GRAD_ACCUM SETUP_____________
 
@@ -970,6 +1056,8 @@ model = LLM(ModelConfig).to(device)
 if master_process : 
     total, active = model.get_num_params()
     print(f"total parameters = {total:,}, acitive parameters = {active:,}")
+    if model.print_fused_adamw: print("Using Fused AdamW")
+    if model.print_act_recomp: print("Using Activation Recomputation")
 
 model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=ModelConfig.moe)
 
@@ -981,32 +1069,33 @@ raw_model:LLM = model.module
 #______________________________________________ TRAINING ______________________________________________
 
 optimizer = raw_model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
-train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, process_rank=ddp_rank, num_proc=ddp_world_size)
-val_loader   = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, process_rank=ddp_rank, num_proc=ddp_world_size)
+x,y = train_loader.next_batch()
 
 for iter in range(TrainingConfig.max_iters+1):
     t0 = perf_counter()
 
-    lr = get_lr(iter, TrainingConfig) 
+    lr = get_lr(iter, TrainingConfig)
     for param_grp in optimizer.param_groups:
         param_grp['lr'] = lr
     
     optimizer.zero_grad(set_to_none=True)
-
     if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
+        a = perf_counter()
         losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
+        b = perf_counter()
         if master_process:
-            print(f"-----val run------- train loss {losses['train']:.4f}, val loss {losses['val']:.4f} --------------")
-
+            print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
+        t0 = b
+    
     for micro_step in range(grad_accum_steps):
         model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
-        x,y = train_loader.next_batch()
-        x,y = x.to(device=device), y.to(device=device)
-
+        # sync_context = model.no_sync() if micro_step < (grad_accum_steps-1) else nullcontext()
+        # with sync_context:
         with ctx:
             _, loss, _ = model(x,y)
-            loss = loss/grad_accum_steps
+            loss:torch.Tensor = loss/grad_accum_steps
 
+        x,y = train_loader.next_batch() # async pre-load next batch
         scaler.scale(loss).backward()
 
     if TrainingConfig.grad_clip != 0.0:
@@ -1018,10 +1107,21 @@ for iter in range(TrainingConfig.max_iters+1):
 
     if master_process:
         torch.cuda.synchronize()
+        mem = torch.cuda.memory_reserved()
         dt  = (perf_counter()-t0)*1000
-        print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms")
+        print(f"step: {iter} | train loss:{loss.item()*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps} | GPU RAM: {mem/1024**3:.2f}GB")
 
 destroy_process_group()
-if TrainingConfig.save_model and master_process:
-    torch.save(model.state_dict(), 'ddp_model.pt')
-    torch.save(raw_model.state_dict(), 'llm_model.pt')
+
+if TrainingConfig.save_model and master_process and False:
+    # might do in-training checkpointing later
+    loss_stats = {'train':train_loss_stats, 'valrun_val':valrun_val_loss_stats, 'valrun_train':valrun_train_loss_stats}
+
+    checkpoint = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'model_state': model.state_dict()}
+    stats      = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'losses':loss_stats, 'total_params':total, 'active_params':active}
+
+    torch.save(checkpoint, TrainingConfig.file_name+'_ckpt.pt')
+    torch.save(stats, TrainingConfig.file_name+'_stats.pt')
+
+    print("Model and config saved to {}.pt".format(TrainingConfig.file_name + '_ckpt'))
+    print("Stats and config saved to {}.pt".format(TrainingConfig.file_name + '_stats'))
