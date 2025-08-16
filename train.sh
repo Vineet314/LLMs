@@ -15,6 +15,8 @@ EVAL_INTERVAL=100
 EVAL_ITERS=10
 SAVE_MODEL=true
 FILE_NAME="llm_model"
+ACT_RECOMP=true
+
 # --- Model Configuration Arguments ---
 N_LAYER=12
 N_EMBD=1024
@@ -77,4 +79,5 @@ python train.py \
     $( [ "$SAVE_MODEL" = true ] && echo "--save_model" ) \
     $( [ "$EVAL" = true ] && echo "--eval" ) \
     $( [ "$MOE" = true ] && echo "--moe" ) \
-    $( [ "$AUX_FREE" = true ] && echo "--aux_free" ) 
+    $( [ "$ACT_RECOMP" = true ] && echo "--act_recomp" ) \
+    $( [ "$AUX_FREE" = true ] && echo "--aux_free" )
