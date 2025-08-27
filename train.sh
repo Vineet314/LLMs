@@ -11,9 +11,10 @@ LEARNING_RATE=7e-5  # to avoid overflow
 WARMUP_STEPS=500
 GRAD_CLIP=0.9
 EVAL=true
-EVAL_INTERVAL=100
+EVAL_INTERVAL=500
 EVAL_ITERS=10
-SAVE_MODEL=true
+SAVE_MODEL=true  # i'd die if this were set to false
+CKPT_INTERVAL=1000
 FILE_NAME="llm_model"
 ACT_RECOMP=true
 
@@ -55,6 +56,8 @@ python train.py \
     --grad_clip $GRAD_CLIP \
     --eval_interval $EVAL_INTERVAL \
     --eval_iters $EVAL_ITERS \
+    --file_name $FILE_NAME \
+    --ckpt_interval $CKPT_INTERVAL \
     --n_layer $N_LAYER \
     --n_embd $N_EMBD \
     --vocab_size $VOCAB_SIZE \
@@ -75,7 +78,6 @@ python train.py \
     --alpha $ALPHA \
     --gamma $GAMMA \
     --coeff $CEOFF \
-    --file_name $FILE_NAME \
     $( [ "$SAVE_MODEL" = true ] && echo "--save_model" ) \
     $( [ "$EVAL" = true ] && echo "--eval" ) \
     $( [ "$MOE" = true ] && echo "--moe" ) \

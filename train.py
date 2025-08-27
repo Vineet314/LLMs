@@ -375,7 +375,7 @@ for iter in range(TrainingConfig.max_iters+1):
         torch.save(stats, TrainingConfig.file_name+'_stats.pt')
         
         del checkpoint, stats, loss_stats # del big variables from RAM
-        print(f"---------------- At iter {iter} : Model and Stats saved")
+        print(f"---------------- At iter {iter} : Model Checkpoint and Stats saved")
 
     # ____________ SAVE BEST CHECKPOINT ____________
     if (TrainingConfig.save_model) and (iter>TrainingConfig.eval_interval) and (losses['val'] < best_val_loss):
@@ -390,4 +390,4 @@ for iter in range(TrainingConfig.max_iters+1):
         torch.save(stats, TrainingConfig.file_name+'_best_stats.pt')
         
         del checkpoint, stats, loss_stats # del big variables from RAM
-        print(f"---------------- At iter {iter} and val loss {losses['val']}: New Best Model saved")
+        print(f"At iter {iter} : val loss {losses['val']:.4f} - New Best Model saved")
