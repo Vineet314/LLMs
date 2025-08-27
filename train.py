@@ -1,4 +1,3 @@
-import warnings ; warnings.filterwarnings("ignore")
 import os
 import math
 import torch
@@ -18,11 +17,15 @@ torch.manual_seed(1729)
 torch.cuda.manual_seed(1729)
 torch.set_float32_matmul_precision('medium')   # Not sure if this has any effect when used with Auto Mixed Precision
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+if torch.cuda.is_available():
+    device = "cuda"
+    if torch.cuda.device_count() > 1: device="cuda:0"; import warnings; warnings.warn("You have MULTIPLE GPUs, but utilizing only ONE")
+else: device = "cpu"
+
 device_type = 'cuda' if 'cuda' in device else 'cpu'
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
-ctx = torch.amp.autocast(device_type=device_type, dtype=getattr(torch, dtype))
-scaler = torch.amp.GradScaler(enabled=(dtype == 'float16')) if device == 'cuda' else nullcontext()
+ctx = torch.amp.autocast(device_type=device_type, dtype=getattr(torch, dtype)) if device == 'cuda' else nullcontext()
+scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # ____________PARAMS-CONFIG_________________
 
@@ -40,6 +43,7 @@ class Trainconfig:
     grad_clip : int
     compile : bool #= False if os.name != 'posix' else True
     save_model : bool
+    ckpt_interval : int
     file_name : str
     act_recomp : bool
 
@@ -93,6 +97,7 @@ TrainingConfig = Trainconfig(
     grad_clip = 1.0,    
     compile = False if os.name != 'posix' else True,
     save_model = True,
+    ckpt_interval=250,
     file_name='llm_model',
     act_recomp=False)   # Default to False
 
@@ -139,13 +144,17 @@ def parse_args():
     parser.add_argument('--dataset',       type=str,   default=TrainingConfig.dataset,       help='The data set to be used for training')
     parser.add_argument('--batch_size',    type=int,   default=TrainingConfig.batch_size,    help='Batch size for training')
     parser.add_argument('--max_iters',     type=int,   default=TrainingConfig.max_iters,     help='Maximum number of iterations for training')
+    parser.add_argument('--eval',         action='store_true', help='Wheter to perform Evalutions once a while')
     parser.add_argument('--eval_interval', type=int,   default=TrainingConfig.eval_interval, help='Interval for evaluation')
     parser.add_argument('--eval_iters',    type=int,   default=TrainingConfig.eval_iters,    help='Number of iterations for evaluation')
     parser.add_argument('--learning_rate', type=float, default=TrainingConfig.learning_rate, help='Learning rate for training')
     parser.add_argument('--warmup_steps',  type=int,   default=TrainingConfig.warmup_steps,  help='Number of warmup steps for learning rate')
     parser.add_argument('--grad_clip',     type=float,  default=TrainingConfig.grad_clip,    help='Gradient Clip value')
-    parser.add_argument('--act_recomp', action='store_true', help='Whether to use (selective) activation recomputation')
-    
+    parser.add_argument('--save_model',   action='store_true', help='Whether to save the model after training')
+    parser.add_argument('--ckpt_interval', type=int,   default=TrainingConfig.ckpt_interval, help='Interval for checkpointing')
+    parser.add_argument('--file_name',     type=str, default=TrainingConfig.file_name, help='Name of the checkpoint to be saved')
+    parser.add_argument('--act_recomp',   action='store_true', help='Whether to use (selective) activation recomputation')
+
     # Model Parameters
     parser.add_argument('--vocab_size',  type=int,   default=ModelConfig.vocab_size,  help='Vocabulary size for the model')
     parser.add_argument('--block_size',  type=int,   default=ModelConfig.block_size,  help='Block size for the model')
@@ -174,9 +183,6 @@ def parse_args():
     parser.add_argument('--total_batch_size_str', type=str, default=str(TrainingConfig.total_batch_size), help='Total batch size for training passed in as a string expression')
     parser.add_argument('--moe',        action='store_true', help='Whether to use Mixture of Experts in the model')
     parser.add_argument('--aux_free',   action='store_true', help='Whether to use Aux Loss Free MoE')
-    parser.add_argument('--eval',       action='store_true', help='Wheter to perform Evalutions once a while')
-    parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
-    parser.add_argument('--file_name', type=str, default=TrainingConfig.file_name, help='Name of the checkpoint to be saved')
 
     return parser.parse_args()
 
@@ -284,7 +290,7 @@ def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader
     for split, loader in [('train', train_loader), ('val', val_loader)]:
         losses = torch.zeros(TrainingConfig.eval_iters)
         for k in range(TrainingConfig.eval_iters):
-            X, Y = loader.next_batch() # Data is now moved to device in next_batch()
+            X, Y = loader.next_batch()
             with ctx:
                 _, loss, _ = model(X, Y)
             losses[k] = loss.item()
@@ -312,31 +318,21 @@ if TrainingConfig.compile :
 #______________________________________________ TRAINING ______________________________________________
 
 optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
-
 x,y = train_loader.next_batch() # get the first batch of training data
-train_loss_stats = []
-valrun_val_loss_stats = []
-valrun_train_loss_stats = []
-for iter in range(TrainingConfig.max_iters+1):
-    t0 = perf_counter()
+train_loss_stats, val_loss_stats = [], []
+best_val_loss = float('inf') # ~1.797 * 10**308 ; float64 upper bound
 
+for iter in range(TrainingConfig.max_iters+1):
+    t0 = perf_counter() # timer stats
+
+    # ____________ UPDATE LEARNING RATE ____________
     lr = get_lr(iter, TrainingConfig) 
-    for param_grp in optimizer.param_groups:
-        param_grp['lr'] = lr
+    for param_grp in optimizer.param_groups: param_grp['lr'] = lr
     
-    optimizer.zero_grad(set_to_none=True)
-    a,b = 0,0
-    if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
-        a = perf_counter()
-        losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
-        valrun_val_loss_stats.append(losses['val'])
-        valrun_train_loss_stats.append(losses['train'])
-        b = perf_counter()
-        print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
-        t0 = b
-    
+    # ____________ ACTUAL TRAINING LOOP ____________
+    # fwd pass -> loss -> scale loss if fp16 -> bwd pass -> clip grads -> step -> update sclaer 
     for micro_step in range(grad_accum_steps):
-        with ctx:
+        with ctx: # auto-mixed precision
             _, loss, _ = model(x,y) #logits, loss, kv cache
             loss:torch.Tensor = loss/grad_accum_steps
 
@@ -344,29 +340,54 @@ for iter in range(TrainingConfig.max_iters+1):
         train_loss_stats.append(loss.item())
         scaler.scale(loss).backward()
 
-    if TrainingConfig.grad_clip != 0.0:
+    if TrainingConfig.grad_clip != 0.0: # gradient clipping
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), TrainingConfig.grad_clip)
 
     scaler.step(optimizer)
-    scaler.update()    
-    mem = 0
-    if "cuda" in device : 
-        torch.cuda.synchronize()
-        mem = torch.cuda.memory_reserved()
-    
+    scaler.update()
+    optimizer.zero_grad(set_to_none=True)
+
+    # ____________ PRINT STATS ____________
+    if "cuda" not in device: mem = 0
+    else: torch.cuda.synchronize() ; mem = torch.cuda.memory_reserved()
+
     dt  = (perf_counter()-t0)*1000
     print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps} | GPU RAM: {mem/1024**3:.2f}GB")
+    
+    # ____________ PERFORM EVAL RUN ____________
+    if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
+        a = perf_counter()
+        losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
+        val_loss_stats.append(losses['val'])
+        b = perf_counter()
+        print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
 
-if TrainingConfig.save_model:
-    # might do in-training checkpointing later
-    loss_stats = {'train':train_loss_stats, 'valrun_val':valrun_val_loss_stats, 'valrun_train':valrun_train_loss_stats}
+    # ____________ SAVE LATEST CHECKPOINT ____________
+    if TrainingConfig.save_model and (iter % TrainingConfig.ckpt_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
+        # model checkpoint
+        loss_stats = {'iter':iter, 'train':train_loss_stats, 'val':val_loss_stats}
 
-    checkpoint = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'model_state': model.state_dict()}
-    stats      = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'losses':loss_stats, 'total_params':total, 'active_params':active}
+        checkpoint = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'model_state': model.state_dict()}
+        stats      = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'losses':loss_stats, 'total_params':total, 'active_params':active}
 
-    torch.save(checkpoint, TrainingConfig.file_name+'_ckpt.pt')
-    torch.save(stats, TrainingConfig.file_name+'_stats.pt')
+        torch.save(checkpoint, TrainingConfig.file_name+'_ckpt.pt')
+        torch.save(stats, TrainingConfig.file_name+'_stats.pt')
+        
+        del checkpoint, stats, loss_stats # del big variables from RAM
+        print(f"---------------- At iter {iter} : Model and Stats saved")
 
-    print("Model and config saved to {}.pt".format(TrainingConfig.file_name + '_ckpt'))
-    print("Stats and config saved to {}.pt".format(TrainingConfig.file_name + '_stats'))
+    # ____________ SAVE BEST CHECKPOINT ____________
+    if (TrainingConfig.save_model) and (iter>TrainingConfig.eval_interval) and (losses['val'] < best_val_loss):
+        # best checkpoint, after atleast 1 val run
+        best_val_loss = losses['val']
+        loss_stats = {'iter':iter, 'train':train_loss_stats, 'val':val_loss_stats}
+
+        checkpoint = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'model_state': model.state_dict()}
+        stats      = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'losses':loss_stats, 'total_params':total, 'active_params':active}
+
+        torch.save(checkpoint, TrainingConfig.file_name+'_best.pt')
+        torch.save(stats, TrainingConfig.file_name+'_best_stats.pt')
+        
+        del checkpoint, stats, loss_stats # del big variables from RAM
+        print(f"---------------- At iter {iter} and val loss {losses['val']}: New Best Model saved")
