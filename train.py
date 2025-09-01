@@ -57,9 +57,10 @@ class LLMconfig:
 
     # Neural Network
     up_dim  : int
-    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'glu', 'swiglu', 'swish', 'mish', 'silu', 'selu','celu','tanh','sigmoid']
+    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu','tanh','sigmoid']
     dropout : float
     n_layer : int
+    norm : str | Literal['layer','rms']
 
     # MoE
     moe : bool
@@ -75,6 +76,7 @@ class LLMconfig:
     
     # Attention
     attn : str | Literal['mha', 'mqa', 'gqa', 'mla']
+    # kv_cache : bool
     n_head : int
     n_kv_heads : int 
         # Only for mla 
@@ -82,7 +84,7 @@ class LLMconfig:
     kv_latent_dim : int | None
     rope_head_dim : int | None
 
-    act_recomp : bool
+    act_recomp : bool  # more of a training param, but the best way to integrate that is to just add it here
 
 TrainingConfig = Trainconfig(
     dataset='tinystories',
@@ -115,6 +117,7 @@ ModelConfig = LLMconfig(
     non_linearity = 'swiglu',  
     dropout=0.0,
     n_layer = 6,
+    norm = 'rms',
 
     n_exp = 16,
     n_shared = 2,
@@ -162,6 +165,7 @@ def parse_args():
     parser.add_argument('--pos_emb',     type=str,   default=ModelConfig.pos_emb,     help='Type of positional encoding (learn, sin, rope)')
     parser.add_argument('--n_layer',     type=int,   default=ModelConfig.n_layer,     help='Number of layers in the model')
     parser.add_argument('--dropout',     type=float, default=ModelConfig.dropout,     help='Dropout rate for the model')
+    parser.add_argument('--norm',        type=str,   default=ModelConfig.norm,        help='Type of normalization (layer, rms)')
     # MLP Params
     parser.add_argument('--up_dim',      type=int,   default=ModelConfig.up_dim,      help='Up dimension for the Expert in the model')
     parser.add_argument('--non_linearity',type=str,   default=ModelConfig.non_linearity,help='Non-linearity for the Expert in the model')

@@ -23,14 +23,17 @@ Available settings to choose from :
         - Load Balancing with Auxilary Loss function (aux_free = False) 
         - Shared Expert Isolation                    (n_shared = 0) 
         - Fine Grained Expert Segmentation           (set up_dim, n_exp, n_act accordingly)
-        - Aux Loss Free Load Balancing               (aux_free = True)  
+        - Aux Loss Free Load Balancing               (aux_free = True)
+
+4. Normalization Layers: 
+   - Standard Layer Norm
+   - Root-Mean-Square Layer Norm
 '''
 
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from torch.utils.checkpoint import checkpoint
 
 from typing import Literal
@@ -49,6 +52,7 @@ class LLMconfig:
     non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu','tanh','sigmoid']
     dropout : float
     n_layer : int
+    norm : str | Literal['layer','rms']
 
     # MoE
     moe : bool
@@ -94,6 +98,18 @@ class LLMconfig:
         x_out = torch.stack([x_re_out, x_im_out], dim=-1).flatten(3) # (B, T, H, hs//2), (B, T, H, hs//2) -> (B, T, H, hs)
 
         return x_out.type_as(x)
+
+class LayerNorm(nn.Module):
+    ''' Implements the given type of layer normalization (either Vanilla Layer Norm or RMS-Layer Norm)'''
+    def __init__(self, config:LLMconfig, dim:int):
+        super().__init__()
+        if config.norm == 'layer': 
+            self.norm = nn.LayerNorm(dim)
+        elif config.norm == '':
+            self.norm = nn.RMSNorm(dim)
+    
+    def forward(self, x):
+        return self.norm(x)
 
 class GQA(nn.Module):
     """ Grouped-Query Attention with or without RoPE """
@@ -169,7 +185,7 @@ class NaiveMHLA(nn.Module):
         self.W_uv  = nn.Linear(config.kv_latent_dim, config.n_embd,        bias=False)
         self.W_o   = nn.Linear(config.n_embd,        config.n_embd,        bias=False)
         
-        # self.ln  = nn.LayerNorm(config.kv_latent_dim)
+        # self.ln  = LayerNorm(config, config.kv_latent_dim)
         self.dropout = nn.Dropout(config.dropout)
 
         self.register_buffer('_k_absorbed_inference', None)
@@ -511,8 +527,8 @@ class Block(nn.Module):
         super().__init__()
         self.is_moe = config.moe
         self.attn = Attention(config)
-        self.ln1  = nn.LayerNorm(config.n_embd)
-        self.ln2  = nn.LayerNorm(config.n_embd)
+        self.ln1  = LayerNorm(config, config.n_embd)
+        self.ln2  = LayerNorm(config, config.n_embd)
         if config.moe:
             self.moe = MoE(config)
         else:
@@ -554,7 +570,7 @@ class LLM(nn.Module):
         self.transformer = nn.ModuleDict(dict(
             drop = nn.Dropout(config.dropout),
             h    = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = nn.LayerNorm(config.n_embd)))
+            ln_f = LayerNorm(config, config.n_embd)))
         
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.tkn_emb.weight = self.lm_head.weight # weight tying

@@ -25,7 +25,7 @@ VOCAB_SIZE=50304
 BLOCK_SIZE=1024   # total tokens per training step = seq_len*batch*grad_accum_steps = 1024*2*4 = 8192  
 DROPOUT=0.01
 POS_EMB="rope" # Can be 'learn', 'sin', 'rope'
-
+NORM='rms' # Can be 'layer', 'rms'
 UP_DIM=768
 NON_LINEARITY="swiglu" # Example: 'relu', 'gelu', 'silu'
 
@@ -59,6 +59,7 @@ python train.py \
     --file_name $FILE_NAME \
     --ckpt_interval $CKPT_INTERVAL \
     --n_layer $N_LAYER \
+    --norm $NORM \
     --n_embd $N_EMBD \
     --vocab_size $VOCAB_SIZE \
     --block_size $BLOCK_SIZE \
