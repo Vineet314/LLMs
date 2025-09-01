@@ -315,6 +315,7 @@ model = LLM(ModelConfig).to(device)
 total, active = model.get_num_params()
 print(f"total parameters = {total:,}, acitive parameters = {active:,}")
 
+if ModelConfig.norm =='rms': print("Using RMSNorm")
 if TrainingConfig.compile :  
     print("Using compiled model")
     model = torch.compile(model)

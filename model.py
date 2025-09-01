@@ -105,8 +105,10 @@ class LayerNorm(nn.Module):
         super().__init__()
         if config.norm == 'layer': 
             self.norm = nn.LayerNorm(dim)
-        elif config.norm == '':
+            self.bias  = self.norm.bias
+        elif config.norm == 'rms':
             self.norm = nn.RMSNorm(dim)
+        self.weight = self.norm.weight
     
     def forward(self, x):
         return self.norm(x)
@@ -609,7 +611,8 @@ class LLM(nn.Module):
 
         active_params += self.tkn_emb.weight.numel()      # embeddings
         if self.config.pos_emb == 'learn': active_params += self.pos_emb.weight.numel()
-        active_params += self.transformer.ln_f.weight.numel() + self.transformer.ln_f.bias.numel()
+        if self.config.norm == 'layer': active_params += self.transformer.ln_f.bias.numel()
+        active_params += self.transformer.ln_f.weight.numel() 
 
         for block in self.transformer.h:
             active_params += sum(p.numel() for p in block.attn.parameters())   # ----|
