@@ -6,7 +6,7 @@ import numpy as np
 
 from pathlib import Path
 from typing import Literal
-from time import perf_counter
+from time import perf_counter, time
 from dataclasses import dataclass
 from contextlib import nullcontext
 
@@ -46,6 +46,9 @@ class Trainconfig:
     ckpt_interval : int
     file_name : str
     act_recomp : bool
+    wandb_log : bool
+    wandb_project : str
+    wandb_run_name : str
 
 @dataclass
 class LLMconfig:
@@ -101,7 +104,10 @@ TrainingConfig = Trainconfig(
     save_model = True,
     ckpt_interval=250,
     file_name='llm_model',
-    act_recomp=False)   # Default to False
+    act_recomp=False,  # Default to False
+    wandb_log = False, # Default to False
+    wandb_project = 'llms',
+    wandb_run_name = str(int(time())))
 
 ModelConfig = LLMconfig(
     # token params
@@ -157,6 +163,9 @@ def parse_args():
     parser.add_argument('--ckpt_interval', type=int,   default=TrainingConfig.ckpt_interval, help='Interval for checkpointing')
     parser.add_argument('--file_name',     type=str, default=TrainingConfig.file_name, help='Name of the checkpoint to be saved')
     parser.add_argument('--act_recomp',   action='store_true', help='Whether to use (selective) activation recomputation')
+    parser.add_argument('--wandb_log',    action='store_true', help='Whether to log training to Weights and Biases')
+    parser.add_argument('--wandb_project',type=str,   default=TrainingConfig.wandb_project, help='Weights and Biases project name')
+    parser.add_argument('--wandb_run_name',type=str,  default=TrainingConfig.wandb_run_name, help='Weights and Biases run name')
 
     # Model Parameters
     parser.add_argument('--vocab_size',  type=int,   default=ModelConfig.vocab_size,  help='Vocabulary size for the model')
@@ -320,6 +329,14 @@ if TrainingConfig.compile :
     print("Using compiled model")
     model = torch.compile(model)
 
+# ___________ WANDB INITIALIZATION __________________
+
+if TrainingConfig.wandb_log:
+    import wandb
+    wandb.init(project=TrainingConfig.wandb_project, 
+               name=TrainingConfig.wandb_run_name,
+               config={'total':total, 'active':active, **vars(ModelConfig), **vars(TrainingConfig)})
+
 #______________________________________________ TRAINING ______________________________________________
 
 optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
@@ -353,13 +370,25 @@ for iter in range(TrainingConfig.max_iters+1):
     scaler.update()
     optimizer.zero_grad(set_to_none=True)
 
-    # ____________ PRINT STATS ____________
+    # ____________ LOGGING ____________
     if "cuda" not in device: mem = 0
     else: torch.cuda.synchronize() ; mem = torch.cuda.memory_reserved()
 
     dt  = (perf_counter()-t0)*1000
-    print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps} | GPU RAM: {mem/1024**3:.2f}GB")
     
+    if iter!=0: # skip the logging for the first iteration
+        print(f"step: {iter} | train loss:{loss.item()*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps} | GPU RAM: {mem/1024**3:.2f}GB")
+        
+        # log to wandb
+        if TrainingConfig.wandb_log:
+            wandb.log({
+                'train/loss': loss.item()*grad_accum_steps,
+                'train/lr': lr,
+                'train/grad_accum_steps': grad_accum_steps,
+                'train/iter_time_ms': dt,
+                'train/GPU_RAM_GB': mem/1024**3
+            }, step=iter)
+
     # ____________ PERFORM EVAL RUN ____________
     if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
         a = perf_counter()
@@ -367,6 +396,13 @@ for iter in range(TrainingConfig.max_iters+1):
         val_loss_stats.append(losses['val'])
         b = perf_counter()
         print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
+
+        # log to wandb
+        if TrainingConfig.wandb_log:
+            wandb.log({
+                'eval/train_loss': losses['train'],
+                'eval/val_loss': losses['val']
+            }, step=iter)
 
     # ____________ SAVE LATEST CHECKPOINT ____________
     if TrainingConfig.save_model and (iter % TrainingConfig.ckpt_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:

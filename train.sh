@@ -17,6 +17,9 @@ SAVE_MODEL=true  # i'd die if this were set to false
 CKPT_INTERVAL=1000
 FILE_NAME="llm_model"
 ACT_RECOMP=true
+WANDB_LOG=true
+WANDB_PROJECT="llms"
+WANDB_RUN_NAME="fineweb_moe_16exp_150k"
 
 # --- Model Configuration Arguments ---
 N_LAYER=12
@@ -57,6 +60,9 @@ python train.py \
     --eval_interval $EVAL_INTERVAL \
     --eval_iters $EVAL_ITERS \
     --file_name $FILE_NAME \
+    --wandb_log $WANDB_LOG \
+    --wandb_project $WANDB_PROJECT \
+    --wandb_run_name $WANDB_RUN_NAME \
     --ckpt_interval $CKPT_INTERVAL \
     --n_layer $N_LAYER \
     --norm $NORM \
