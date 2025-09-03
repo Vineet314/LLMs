@@ -206,7 +206,7 @@ for key, value in vars(args).items():
         value = eval(value)
         setattr(TrainingConfig, 'total_batch_size', value)
     elif key == 'act_recomp':
-        setattr(ModelConfig, key, value)
+        setattr(ModelConfig, key, value), setattr(TrainingConfig, key, value)
     else:
         if isinstance(value, str) and key !='non_linearity':
             value = value.lower().strip()
