@@ -36,24 +36,24 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
-from typing import Literal
+from typing import Literal, Optional
 from dataclasses import dataclass 
 
 @dataclass
 class BlockConfig:
-    #['n_embd', 'moe/mlp', up_dim, non_linearity, dropout, n_exp, n_shared, n_act, aux_free, coeff alpha, gamma]
-    n_embd : int
-    moe : bool
-    up_dim  : int
-    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu','tanh','sigmoid']
-    dropout : float
-    n_exp : int | None
-    n_shared : int | None
-    n_act : int | None
-    coeff : float | None
-    aux_free : bool | None
-    alpha : float | None
-    gamma: float | None
+    n_embd: int
+    moe: bool
+    up_dim: int
+    non_linearity: str | Literal['elu', 'lrelu', 'relu', 'gelu', 'swish', 'mish', 'silu','selu', 'celu', 'tanh', 'sigmoid']
+    dropout: float
+    # Optional fields with defaults
+    n_exp:    Optional[int] = None
+    n_shared: Optional[int] = None
+    n_act:    Optional[int] = None
+    coeff:    Optional[float] = None
+    aux_free: Optional[bool] = None
+    alpha:    Optional[float] = None
+    gamma:    Optional[float] = None
 
 @dataclass
 class LLMconfig:
@@ -543,12 +543,12 @@ class MoE(nn.Module):
 
 class Block(nn.Module):
     """ A single Transformer block combining attention and MLP. """
-    def __init__(self, config:BlockConfig):
+    def __init__(self, config:BlockConfig, global_config:LLMconfig):
         super().__init__()
         self.is_moe = config.moe
-        self.attn = Attention(config)
-        self.ln1  = LayerNorm(config, config.n_embd)
-        self.ln2  = LayerNorm(config, config.n_embd)
+        self.attn = Attention(global_config)
+        self.ln1  = LayerNorm(global_config, config.n_embd)
+        self.ln2  = LayerNorm(global_config, config.n_embd)
         if config.moe:
             self.moe = MoE(config)
         else:
@@ -589,7 +589,7 @@ class LLM(nn.Module):
     
         self.transformer = nn.ModuleDict(dict(
             drop = nn.Dropout(config.dropout),
-            h    = nn.ModuleList([Block(config) for config in config.layer_configs]),
+            h    = nn.ModuleList([Block(blockconfig, config) for blockconfig in config.layer_configs]),
             ln_f = LayerNorm(config, config.n_embd)))
         
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)

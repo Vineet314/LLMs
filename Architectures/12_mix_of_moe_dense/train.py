@@ -193,23 +193,33 @@ if ModelConfig.CUSTOM_LAYERS:
     # list pattern : ['n_embd', 'moe/mlp', up_dim, non_linearity, dropout, n_exp, n_shared, n_act, aux_free, coeff alpha, gamma]
     layer_configs = []
     for layer_str in layers:
-        parts = layer_str.split(':')
+        parts:list[str] = layer_str.split(':')
+        if parts[0].lower() == 'mlp':
+            layer_configs.append(BlockConfig(
+                n_embd= ModelConfig.n_embd, # same for all layers
+                moe= False, # True for MoE, False for MLP
+                up_dim= int(parts[1].strip()),
+                non_linearity= parts[2].strip(),
+                dropout= float(parts[3].strip())))
 
-        layer_configs.append(BlockConfig(
-            n_embd= ModelConfig.n_embd, # same for all layers
-            moe= parts[0].lower() == 'moe', # True for MoE, False for MLP
-            up_dim= int(parts[1]),
-            non_linearity= parts[2],
-            dropout= float(parts[3]),
-            n_exp= int(parts[4]),
-            n_shared= int(parts[5]),
-            n_act= int(parts[6]),
-            aux_free= parts[7].lower() in ['true', '1', 'yes'],
-            coeff= float(parts[8]),
-            alpha= float(parts[9]),
-            gamma= float(parts[10])))
+        elif parts[0].lower() == 'moe':
+            layer_configs.append(BlockConfig(
+                n_embd= ModelConfig.n_embd, # same for all layers
+                moe= True, # True for MoE, False for MLP
+                up_dim= int(parts[1].strip()),
+                non_linearity= parts[2].strip(),
+                dropout= float(parts[3].strip()),
+                n_exp= int(parts[4].strip()),
+                n_shared= int(parts[5].strip()),
+                n_act= int(parts[6].strip()),
+                aux_free= parts[7].strip().lower() in ['true', '1', 'yes'],
+                coeff= float(parts[8].strip()),
+                alpha= float(parts[9].strip()),
+                gamma= float(parts[10].strip())))
+        else:
+            raise ValueError(f"Layer type {parts[0]} not recognized. Use 'mlp' or 'moe'")
 
-    assert ModelConfig.n_layer == len(layer_configs), "Number of layers must match the length of layer_configs"
+    assert ModelConfig.n_layer == len(layer_configs), f"Number of layers {ModelConfig.n_layer} must match the length of layer_configs {len(layer_configs)}"
     ModelConfig.layer_configs = layer_configs
 else:
     ModelConfig.layer_configs = [BlockConfig(
@@ -284,7 +294,7 @@ class DataLoader:
             y = y.to(self.device)
         return x, y
 
-data_dir = os.path.join('data', TrainingConfig.dataset)
+data_dir = os.path.join('../../data', TrainingConfig.dataset)
 print(f"Using Dataset {Path(data_dir).stem}")
 train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path=os.path.join(data_dir, "train.bin"), device=device)
 val_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path=os.path.join(data_dir, "val.bin"), device=device)
