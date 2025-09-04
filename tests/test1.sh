@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Test Training of a single model.
+# Test Training of a single SIMPLE model.
 
 # --- Training Configuration Arguments ---
 DATASET='fineweb'

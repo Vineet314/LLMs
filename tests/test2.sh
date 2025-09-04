@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Test Training of a single model.
+# Test Training of a single CUSTOM LAYERS model.
 
 # --- Training Configuration Arguments ---
 DATASET='fineweb'
