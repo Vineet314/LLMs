@@ -1,6 +1,7 @@
 import warnings; warnings.filterwarnings('ignore')
 import os
 import math
+import json
 import torch
 import argparse
 import numpy as np
@@ -143,7 +144,7 @@ def parse_args():
     # for simple LLMs with all layers having same params, pass-in normally.
     # if passing in custom layers, you still need to pass in `n_layer`. Other FFN/ATTN arguments will be inferred from the layer configs.
     # ONLY one of the following is to be provided if using custom layers configurations. 
-    parser.add_argument('--layer_configs', nargs='+', default=None, help='List of layer configs. Refer to `parameters.md` for details.')
+    parser.add_argument('--layer_configs', type=str, default=None, help='List of dicts of layer configs passed in as a string in bash. Refer to `parameters.md` for details.')
     parser.add_argument('--layer_configs_jsonl', type=str, default=None, help='Path for the JSON file containing the layer configurations')
 
     return parser.parse_args()
@@ -158,28 +159,23 @@ single_layer_config = {param:None for param in block_params} # for simple LLM
 for key,val in vars(args).items():
     if   key == 'act_recomp' : setattr(ModelConfig, key, val); setattr(TrainingConfig, key, val)
     elif key == 'total_batch_size_str': value = eval(val); setattr(TrainingConfig, 'total_batch_size', value)
-    
     elif key in training_params: setattr(TrainingConfig, key, val)
     elif key in model_params: setattr(ModelConfig, key, val)
-    
-    elif key == 'layer_configs' and val is not None:
-        setattr(ModelConfig, 'CUSTOM_LAYERS', True)
-        assert vars(args)['layer_configs_jsonl'] is None, "\nOnly one of `layer_configs` or `layer_configs_jsonl` can be passed-in."
-        if isinstance(val, list) and all([isinstance(valoo, dict) for valoo in val]): 
-            multi_layer_configs:list[dict] = val
-        else: 
-            raise TypeError(f"Expected a python list of dictionaries")
-    
-    elif key == 'layer_configs_jsonl' and val is not None:
-        setattr(ModelConfig, 'CUSTOM_LAYERS', True)
-        assert vars(args)['layer_configs'] is None, "\nOnly one of `layer_configs` or `layer_configs_jsonl` can be passed-in."
-        import json; from pathlib import Path
-        with open(Path(val), "r", encoding="utf-8") as f: multi_layer_configs = [json.loads(line) for line in f]
-    
+    elif key in ['layer_configs', 'layer_configs_jsonl']: continue
     else: # means block params are passed seperatley, intened for simple-LLM
         # Homogeneous model.
         setattr(ModelConfig, 'CUSTOM_LAYERS', False)
         if key in block_params: single_layer_config[key] = val
+
+if vars(args)['layer_configs'] is not None:
+    setattr(ModelConfig, 'CUSTOM_LAYERS', True)
+    assert vars(args)['layer_configs_jsonl'] is None, "\nOnly one of `layer_configs` or `layer_configs_jsonl` can be passed-in."
+    multi_layer_configs = json.loads(vars(args)['layer_configs'])
+
+if vars(args)['layer_configs_jsonl'] is not None:
+    setattr(ModelConfig, 'CUSTOM_LAYERS', True)
+    assert vars(args)['layer_configs'] is None, "\nOnly one of `layer_configs` or `layer_configs_jsonl` can be passed-in."
+    with open(val, "r", encoding="utf-8") as f: multi_layer_configs = [json.loads(line) for line in f]
 
 if not ModelConfig.CUSTOM_LAYERS: # for simple LLM
     print("Using simple homogeneous LLM")
