@@ -181,8 +181,10 @@ for key,val in vars(args).items():
         if key in block_params: single_layer_config[key] = val
 
 if not ModelConfig.CUSTOM_LAYERS: # for simple LLM
+    print("Using simple homogeneous LLM")
     multi_layer_configs = [single_layer_config for _ in range(ModelConfig.n_layer)]
 else:
+    print("Using custom heterogeneous LLM")
     # `multi_layer_config` varible exists and is of the type list[dict]
     assert ModelConfig.n_layer == len(multi_layer_configs), f"\nNumber of layers ({ModelConfig.n_layer}) must match the length of layer_configs ({len(multi_layer_configs)})"
 
