@@ -137,7 +137,7 @@ def parse_args():
     parser.add_argument('--aux_free',   action='store_true', help='Whether to use Aux Loss Free MoE')
 
     # Custom Layer configuration
-    # dict_keys(['attn', 'n_head', 'moe', 'up_dim', 'non_linearity', 'dropout', 'n_kv_heads', 'q_latent_dim', 'kv_latent_dim', 'rope_head_dim', 'n_exp', 'n_shared', 'n_act', 'coeff', 'aux_free', 'alpha', 'gamma'])
+    # dict_keys(['attn', 'n_head', 'moe', 'up_dim', 'non_linearity', 'n_kv_heads', 'q_latent_dim', 'kv_latent_dim', 'rope_head_dim', 'n_exp', 'n_shared', 'n_act', 'coeff', 'aux_free', 'alpha', 'gamma'])
     # OMG THIS SPINS MY HEAD
     # for simple LLMs with all layers having same params, pass-in normally.
     # if passing in custom layers, you still need to pass in `n_layer`. Other FFN/ATTN arguments will be inferred from the layer configs.
@@ -150,7 +150,7 @@ def parse_args():
 args = parse_args()
 
 model_params    = [param.name for param in fields(LLMconfig)]
-block_params    = [param.name for param in fields(BlockConfig)]; block_params.remove('n_embd'); block_params.remove('pos_emb')
+block_params    = [param.name for param in fields(BlockConfig)]; [block_params.remove(i) for i in ('n_embd', 'pos_emb', 'dropout')] #block_params.remove('n_embd'); block_params.remove('pos_emb'); block_params.remove('dropout')
 training_params = [param.name for param in fields(Trainconfig)]
 
 single_layer_config = {param:None for param in block_params} # for simple LLM
@@ -186,7 +186,7 @@ else:
     # `multi_layer_config` varible exists and is of the type list[dict]
     assert ModelConfig.n_layer == len(multi_layer_configs), f"\nNumber of layers ({ModelConfig.n_layer}) must match the length of layer_configs ({len(multi_layer_configs)})"
 
-args = [ModelConfig.n_embd, ModelConfig.pos_emb]
+args = [ModelConfig.n_embd, ModelConfig.pos_emb, ModelConfig.dropout]
 ModelConfig.layer_configs = [BlockConfig(*args, **kwargs) for kwargs in multi_layer_configs]
 
 # run a few checks 

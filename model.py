@@ -44,6 +44,7 @@ class BlockConfig:
     # global
     n_embd: int
     pos_emb: str | Literal['learn', 'sin', 'rope']
+    dropout: float
     # attn
     attn: str | Literal['mha', 'mqa', 'gqa', 'mla']
     n_head: int
@@ -51,7 +52,6 @@ class BlockConfig:
     moe: bool
     up_dim: int
     non_linearity: str | Literal['elu', 'lrelu', 'relu', 'gelu', 'swish', 'mish', 'silu','selu', 'celu', 'tanh', 'swiglu', 'sigmoid']
-    dropout: float
 
     # Optional fields with default as None
     # attn
@@ -197,8 +197,8 @@ class NaiveMHLA(nn.Module):
         # self.ln  = LayerNorm(config, config.kv_latent_dim)
         self.dropout = nn.Dropout(config.dropout)
 
-        self.register_buffer('_k_absorbed_inference', None)
-        self.register_buffer('_v_absorbed_inference', None)
+        self.register_buffer('_k_absorbed_inference', None, persistent=False)
+        self.register_buffer('_v_absorbed_inference', None, persistent=False)
 
     def _precompute_absorbed_matrices(self):
         """Precomputes k_absorbed and v_absorbed for efficient inference."""
@@ -573,7 +573,7 @@ class LLM(nn.Module):
             pos_emb[:, 1::2] = torch.cos(position * div_term)
             self.register_buffer('pos_emb', pos_emb)
         elif config.pos_emb == 'rope':
-            self.register_buffer("freqs_cis_layers", self._precompute_freqs_cis_layers())
+            self.register_buffer("freqs_cis_layers", self._precompute_freqs_cis_layers(), persistent=False)
     
         self.transformer = nn.ModuleDict(dict(
             drop = nn.Dropout(config.dropout),
@@ -602,7 +602,7 @@ class LLM(nn.Module):
             if layer_config.pos_emb=='rope': freqs_cis_layers.append(freqs_cis) # Should always happen 
             else: freqs_cis_layers.append(None) # Should never happen
 
-        return freqs_cis_layers
+        return torch.stack(freqs_cis_layers, dim=0) # register_buffer only accepts a torch.tensor
         
     def _init_weights(self, module):
         """Initializes model weights."""
