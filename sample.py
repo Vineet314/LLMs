@@ -45,6 +45,7 @@ def main(args):
 
     model = LLM(ModelConfig).to(device)
     model.load_state_dict(checkpoint['model_state'])
+    # import code; code.interact(local=locals())
     model.eval()
 
     start_ids = tokenizer.encode(args.prompt)
