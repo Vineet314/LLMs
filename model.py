@@ -29,7 +29,7 @@ Available settings to choose from :
    - Standard Layer Norm
    - Root-Mean-Square Layer Norm
 '''
-
+import warnings; warnings.filterwarnings('ignore')
 import math
 import torch
 import torch.nn as nn

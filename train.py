@@ -1,3 +1,4 @@
+import warnings; warnings.filterwarnings('ignore')
 import os
 import math
 import torch
