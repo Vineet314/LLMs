@@ -682,7 +682,7 @@ class LLM(nn.Module):
         tkn_emb = self.tkn_emb(idx)  # Shape: (B, T, n_embd)
         
         x = tkn_emb # Default value for x
-
+        freqs_cis_layers = [None for _ in range(self.config.n_layer)]
         if self.config.pos_emb == 'rope':
             freqs_cis_layers = [freqs_cis[start_pos : start_pos + T] for freqs_cis in self.freqs_cis_layers]
 
