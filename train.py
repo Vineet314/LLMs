@@ -390,7 +390,8 @@ for iter in range(TrainingConfig.max_iters+1):
         # model checkpoint
         loss_stats = {'iter':iter, 'train':train_loss_stats, 'val':val_loss_stats}
 
-        checkpoint = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'model_state': model.state_dict()}
+        model_state = model._orig_mod.state_dict() if hasattr(model, '_orig_mod') else model.state_dict()
+        checkpoint = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'model_state': model_state}
         stats      = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'losses':loss_stats, 'total_params':total, 'active_params':active}
 
         torch.save(checkpoint, TrainingConfig.file_name+'_ckpt.pt')
@@ -405,6 +406,7 @@ for iter in range(TrainingConfig.max_iters+1):
         best_val_loss = losses['val']
         loss_stats = {'iter':iter, 'train':train_loss_stats, 'val':val_loss_stats}
 
+        model_state = model._orig_mod.state_dict() if hasattr(model, '_orig_mod') else model.state_dict()
         checkpoint = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'model_state': model.state_dict()}
         stats      = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'losses':loss_stats, 'total_params':total, 'active_params':active}
 
