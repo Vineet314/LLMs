@@ -573,7 +573,10 @@ class LLM(nn.Module):
             pos_emb[:, 1::2] = torch.cos(position * div_term)
             self.register_buffer('pos_emb', pos_emb)
         elif config.pos_emb == 'rope':
-            self.register_buffer("freqs_cis_layers", self._precompute_freqs_cis_layers(), persistent=False)
+            fcl = self._precompute_freqs_cis_layers() 
+            for i,fci in enumerate(fcl): self.register_buffer(f"freqs_cis_{i}", fci)
+            del fcl
+            # self.register_buffer("freqs_cis_layers", self._precompute_freqs_cis_layers(), persistent=False)
     
         self.transformer = nn.ModuleDict(dict(
             drop = nn.Dropout(config.dropout),
@@ -602,7 +605,8 @@ class LLM(nn.Module):
             if layer_config.pos_emb=='rope': freqs_cis_layers.append(freqs_cis) # Should always happen 
             else: freqs_cis_layers.append(None) # Should never happen
 
-        return torch.stack(freqs_cis_layers, dim=0) # register_buffer only accepts a torch.tensor
+        # return torch.stack(freqs_cis_layers, dim=0) # register_buffer only accepts a torch.tensor
+        return freqs_cis_layers
         
     def _init_weights(self, module):
         """Initializes model weights."""
@@ -684,7 +688,7 @@ class LLM(nn.Module):
         x = tkn_emb # Default value for x
         freqs_cis_layers = [None for _ in range(self.config.n_layer)]
         if self.config.pos_emb == 'rope':
-            freqs_cis_layers = [freqs_cis[start_pos : start_pos + T] for freqs_cis in self.freqs_cis_layers]
+            freqs_cis_layers = [getattr(self, f"freqs_cis_{i}")[start_pos : start_pos + T] for i in range(self.config.n_layer)]
 
         elif self.config.pos_emb == 'learn':
             pos = torch.arange(start_pos, start_pos + T, dtype=torch.long, device=idx.device)
