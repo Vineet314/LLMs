@@ -151,7 +151,7 @@ def parse_args():
     # Attention Params
     parser.add_argument('--attn',        type=str,   default=ModelConfig.attn,        help='Type of attention mechanism (mha, mqa, gqa, mla)')
     parser.add_argument('--n_head',      type=int,   default=ModelConfig.n_head,      help='Number of attention heads in the model')
-    parser.add_argument('--n_kv_heads',  type=int,   default=ModelConfig.n_kv_heads,  help='Number of KV heads in the model (only for gqa)')
+    parser.add_argument('--n_kv_heads',  type=int,   default=ModelConfig.n_head,      help='Number of KV heads in the model (only for gqa/mqa)')
     parser.add_argument('--q_latent_dim',  type=int, default=ModelConfig.q_latent_dim,help='Query latent dimension (only for mla)')
     parser.add_argument('--kv_latent_dim', type=int, default=ModelConfig.kv_latent_dim,help='KV latent dimension (only for mla)')
     parser.add_argument('--rope_head_dim', type=int, default=ModelConfig.rope_head_dim,help='RoPE head dimension (only for mla)')
@@ -161,7 +161,8 @@ def parse_args():
     parser.add_argument('--aux_free',   action='store_true', help='Whether to use Aux Loss Free MoE')
 
     # Custom Layer configuration
-    # list pattern : ['n_embd', 'moe/mlp', up_dim, non_linearity, dropout, n_exp, n_shared, n_act, aux_free, coeff alpha, gamma]
+    # list pattern : [n_embd, pos_emb, attn, n_head, n_kv_heads, q_latent_dim, kv_latent_dim, rope_head_dim, 'moe/mlp', up_dim, non_linearity, dropout, n_exp, n_shared, n_act, aux_free, coeff alpha, gamma]
+    # OMG THIS SPINS MY HEAD
     # if passing in even a single custom layer, make sure to pass in all layers arguments, albeit with same values
     # if passing in custom layers, you need not pass in n_layer, and other FFN arguments seperately, as they will be inferred from the layer configs
     # However, you still need to pass in the hyperparams, like coeff for ALL layers, albeit the same value
