@@ -361,7 +361,7 @@ if TrainingConfig.wandb_log:
         for attr in ['up_dim', 'non_linearity','moe', 'n_exp', 'n_shared', 'n_act', 'aux_free', 'coeff', 'alpha', 'gamma']:
             setattr(dummy_config, attr, 'custom')
     
-    wandb_config = {'total_params':total, 'active_params':active, **vars(TrainingConfig), **vars(dummy_config)}
+    wandb_config = {'total':total, 'active':active, **vars(TrainingConfig), **vars(dummy_config)}
 
     wandb.init(project=TrainingConfig.wandb_project, 
                name=TrainingConfig.wandb_run_name,
