@@ -7,17 +7,17 @@ from tqdm import tqdm
 from datasets import load_dataset
 
 n_proc = os.cpu_count() // 2
-DATASET_NAME = "roneneldan/TinyStories" # has about 469M training tokens and 4.7M validation tokens
+DATASET_NAME = "Salesforce/wikitext" # 118M training tokens, 1.2M validation tokens
 EOT_TOKEN_ID = 50256 # End-of-text token for gpt2
 
 def tokenize_and_save():
     """
-    Downloads, tokenizes, and saves the TinyStories dataset.
+    Downloads, tokenizes, and saves the given dataset.
     This version uses the `map` method for efficient tokenization.
     """
 
     print(f"Loading dataset: {DATASET_NAME}")
-    dataset = load_dataset(DATASET_NAME, cache_dir='./cache', num_proc=n_proc)
+    dataset = load_dataset(DATASET_NAME, "wikitext-103-v1", cache_dir='./cache')
 
     split_dataset = dataset['train'].train_test_split(test_size=0.01, seed=1729, shuffle=True)
     split_dataset['val'] = split_dataset.pop('test')  # Rename 'test' to 'val'
