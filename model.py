@@ -598,7 +598,10 @@ class LLM(nn.Module):
             freqs = torch.outer(seq, theta)
             # Convert to complex numbers: r * e^(i*theta)
             freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
-            freqs_cis_layers.append(freqs_cis)
+
+            if layer_config.pos_emb=='rope': freqs_cis_layers.append(freqs_cis) # Should always happen 
+            else: freqs_cis_layers.append(None) # Should never happen
+
         return freqs_cis_layers
         
     def _init_weights(self, module):
@@ -667,12 +670,13 @@ class LLM(nn.Module):
         start_pos = 0
 
         if kv_caches is not None and kv_caches[0] is not None:
-            if self.config.attn in ('mha', 'mqa', 'gqa'):
+            first_layer_config = self.config.layer_configs[0]
+            if first_layer_config.attn in ('mha', 'mqa', 'gqa'):
                 start_pos = kv_caches[0][0].shape[-2]
-            elif self.config.attn == 'mla':
-                if self.config.pos_emb == 'rope':
+            elif first_layer_config.attn == 'mla':
+                if first_layer_config.pos_emb == 'rope':
                     start_pos = kv_caches[0]['c_kv'].shape[1]
-                else:
+                else: # Naive MLA (tensor cache)
                     start_pos = kv_caches[0].shape[1]
 
         tkn_emb = self.tkn_emb(idx)  # Shape: (B, T, n_embd)
@@ -726,28 +730,32 @@ class LLM(nn.Module):
         self.eval()
         kv_caches = [None] * self.config.n_layer
 
-        for i in range(max_new_tokens):
-            if i == 0:
-                idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
-                input_for_forward = idx_cond
-            else:
-                input_for_forward = idx[:, -1:]
+        for _ in range(max_new_tokens):
+            # crop context to block size, rolling context window
+            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            # for first token, use full prompt, and only last token for subsequent tokens
+            input_for_forward = idx_cond if kv_caches[0] is None else idx[:, -1:]
 
+            # handle the rolling KV cache
             if kv_caches[0] is not None:
-                if self.config.attn in ('mha', 'mqa', 'gqa'):
+                # determine current cache length from any layer, say first
+                first_layer_config = self.config.layer_configs[0]
+                if first_layer_config.attn in ('mha', 'mqa', 'gqa'):
                     cache_len = kv_caches[0][0].shape[-2]
-                elif self.config.attn == 'mla':
+                elif first_layer_config.attn == 'mla':
                      cache_len = kv_caches[0]['c_kv'].shape[1] if self.config.pos_emb == 'rope' else kv_caches[0].shape[1]
+                else: cache_len = 0 # should never happen
 
+                # actual handling part
                 if cache_len >= self.config.block_size:
                     # Keep the most recent (block_size - 1) tokens to make space for the new one
                     keep_len = self.config.block_size - 1
-                    for layer_idx in range(self.config.n_layer):
+                    for layer_idx, layer_config in enumerate(self.config.layer_configs):
                         layer_cache = kv_caches[layer_idx]
-                        if self.config.attn in ('mha', 'mqa', 'gqa'):
+                        if layer_config.attn in ('mha', 'mqa', 'gqa'):
                             k, v = layer_cache
                             kv_caches[layer_idx] = (k[..., -keep_len:, :], v[..., -keep_len:, :])
-                        elif self.config.attn == 'mla':
+                        elif layer_config.attn == 'mla':
                             if self.config.pos_emb == 'rope':
                                 layer_cache['c_kv'] = layer_cache['c_kv'][:, -keep_len:, :]
                                 layer_cache['k_r']  = layer_cache['k_r'][:, :, -keep_len:, :] # Seq len is dim 2
@@ -755,17 +763,20 @@ class LLM(nn.Module):
                                 kv_caches[layer_idx] = layer_cache[:, -keep_len:, :]
 
             # The forward pass now returns three items; we only need logits and caches for generation
-            logits, _, kv_caches = self.forward(input_for_forward, kv_caches=kv_caches)
-            logits = logits[:, -1, :]
+            logits, _, kv_caches = self(input_for_forward, kv_caches=kv_caches)
+            logits = logits[:, -1, :] # logits for final token
 
-            if temperature > 0:
-                logits = logits / temperature
-            if topk is not None:
-                v, _ = torch.topk(logits, min(topk, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
+            if temperature == 0.0:
+                # greedy sampling, deterministic, "hardmax" instead of softmax
+                idx_next = torch.argmax(logits, dim=-1, keepdim=True) 
+            else:
+                logits = logits / temperature # this is actuallt the randomness or 'creativty' part
+                if topk is not None:
+                    v, _ = torch.topk(logits, min(topk, logits.size(-1))) # pick topk values
+                    logits[logits < v[:, [-1]]] = -float('inf') # mask out other logits
+                probs = F.softmax(logits, dim=-1) # generate a probability distribution
+                idx_next = torch.multinomial(probs, num_samples=1) # sample from probabilty distribution
             
-            probs = F.softmax(logits, dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, idx_next), dim=1)
 
         self.train()
