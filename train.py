@@ -150,7 +150,7 @@ def parse_args():
 args = parse_args()
 
 model_params    = [param.name for param in fields(LLMconfig)]
-block_params    = [param.name for param in fields(BlockConfig)]
+block_params    = [param.name for param in fields(BlockConfig)]; block_params.remove('n_embd'); block_params.remove('pos_emb')
 training_params = [param.name for param in fields(Trainconfig)]
 
 single_layer_config = {param:None for param in block_params} # for simple LLM
