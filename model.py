@@ -36,8 +36,37 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
-from typing import Literal
+from typing import Literal, Optional
 from dataclasses import dataclass 
+
+@dataclass
+class BlockConfig:
+    # global
+    n_embd: int
+    pos_emb: str | Literal['learn', 'sin', 'rope']
+    # attn
+    attn: str | Literal['mha', 'mqa', 'gqa', 'mla']
+    n_head: int
+    # ffn
+    moe: bool
+    up_dim: int
+    non_linearity: str | Literal['elu', 'lrelu', 'relu', 'gelu', 'swish', 'mish', 'silu','selu', 'celu', 'tanh', 'swiglu', 'sigmoid']
+    dropout: float
+
+    # Optional fields with default as None
+    # attn
+    n_kv_heads: Optional[int] = None
+    q_latent_dim:  Optional[int] = None
+    kv_latent_dim: Optional[int] = None
+    rope_head_dim: Optional[int] = None
+    # ffn
+    n_exp:    Optional[int] = None
+    n_shared: Optional[int] = None
+    n_act:    Optional[int] = None
+    coeff:    Optional[float] = None
+    aux_free: Optional[bool] = None
+    alpha:    Optional[float] = None
+    gamma:    Optional[float] = None
 
 @dataclass
 class LLMconfig:
@@ -47,36 +76,14 @@ class LLMconfig:
     n_embd : int
     pos_emb : str | Literal['learn','sin','rope']
 
-    # Neural Network
-    up_dim  : int
-    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'swish', 'mish', 'silu', 'selu','celu','tanh','sigmoid']
+    # model params
     dropout : float
     n_layer : int
     norm : str | Literal['layer','rms']
 
-    # MoE
-    moe : bool
-
-    n_exp : int
-    n_shared : int  
-    n_act : int      ### INCLUDES THE SHARED EXPERTS
-    coeff : float
-
-    aux_free : bool
-    alpha : float   # complementry aux loss coeff
-    gamma: float    # bias update speed
-    
-    # Attention
-    attn : str | Literal['mha', 'mqa', 'gqa', 'mla']
-    # kv_cache : bool
-    n_head : int
-    n_kv_heads : int 
-        # Only for mla 
-    q_latent_dim  : int | None
-    kv_latent_dim : int | None
-    rope_head_dim : int | None
-
     act_recomp : bool  # more of a training param, but the best way to integrate that is to just add it here
+    CUSTOM_LAYERS : bool
+    layer_configs : list[BlockConfig] | None # dict keys = ['n_embd', 'moe/mlp', up_dim, non_linearity, dropout, n_exp, n_shared, n_act, aux_free, coeff alpha, gamma]
 
     @staticmethod
     def apply_rotary_emb(x:torch.Tensor, freqs_cis:torch.Tensor)->torch.Tensor:
@@ -116,7 +123,7 @@ class LayerNorm(nn.Module):
 class GQA(nn.Module):
     """ Grouped-Query Attention with or without RoPE """
 
-    def __init__(self, config:LLMconfig):
+    def __init__(self, config:BlockConfig):
         super().__init__()
         if config.attn == 'mha' : config.n_kv_heads = config.n_head
         elif config.attn == 'mqa' : config.n_kv_heads = 1
@@ -174,7 +181,7 @@ class GQA(nn.Module):
 
 class NaiveMHLA(nn.Module):
     """ A fully parallel implementation of the MHLA algorithm without the RoPE. No for loops."""
-    def __init__(self, config:LLMconfig):
+    def __init__(self, config:BlockConfig):
         super().__init__()
         assert config.n_embd % config.n_head == 0, "num of heads must be a divisor of n_embd"
         self.head_size = config.n_embd // config.n_head
@@ -210,7 +217,7 @@ class NaiveMHLA(nn.Module):
         nh, n_kvl, hs = self.config.n_head, self.config.kv_latent_dim, self.config.n_embd//self.config.n_head
 
         # k_eff and v_eff based on training or inference
-        if self.training or VAL_RUN: # HIDDEN IN PLAIN SIGHT : THIS BUG TOOK ~16 HRS TO DEBUG
+        if self.training or VAL_RUN: # HIDDEN IN THE DEPTHS : THIS BUG TOOK ~16 HRS TO DEBUG
             k_eff = (self.W_dq.weight.T @ self.W_uq.weight.T  @ self.W_uk.weight).view(nh, hs, n_kvl).unsqueeze(0)
             v_eff = (self.W_uv.weight.T @ self.W_o.weight.T).view(n_kvl, nh, hs).transpose(0,1).unsqueeze(0)
         else:
@@ -258,7 +265,7 @@ class FullMHLA(nn.Module):
     with Decoupled Rotary Position Embeddings (RoPE), as described in DeepSeek-V2.
     """
      
-    def __init__(self, config:LLMconfig):
+    def __init__(self, config:BlockConfig):
         super().__init__()
         assert config.n_embd % config.n_head == 0, "num of heads must be a divisor of n_embd"
         self.config = config
@@ -351,7 +358,7 @@ class FullMHLA(nn.Module):
         mask = torch.triu(torch.ones(T, T_full, device=x.device, dtype=torch.bool), diagonal=T_full - T + 1)
         attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
 
-        attn = self.dropout(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
+        attn:torch.Tensor = self.dropout(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
 
         # final output : attn @ C_kv @ v_abs 
         # (B, nh, T, T) * (B, 1, T, n_kvl) * (1, nh, n_kvl, hs) = (B, nh, T, hs)
@@ -365,7 +372,7 @@ class FullMHLA(nn.Module):
 class Attention(nn.Module):
     """ Routes the attention mechanism according to the config"""
 
-    def __init__(self, config:LLMconfig):
+    def __init__(self, config:BlockConfig):
         super().__init__()
         self.config = config
         if config.attn in ('mha','mqa','gqa'):
@@ -382,7 +389,7 @@ class Attention(nn.Module):
 
 class MLP(nn.Module):
     """ A simple feed-forward network block. """
-    def __init__(self, config: LLMconfig):
+    def __init__(self, config: BlockConfig):
         super().__init__()
         self.non_linearity = config.non_linearity.lower()
         
@@ -417,7 +424,7 @@ class MLP(nn.Module):
 
 class Expert(nn.Module):
     """ A single feed-forward network expert. """
-    def __init__(self, config:LLMconfig):
+    def __init__(self, config:BlockConfig):
         super().__init__()
         self.expert = MLP(config)
         
@@ -431,7 +438,7 @@ class MoE(nn.Module):
     Ref: https://arxiv.org/pdf/2412.19437
     '''
 
-    def __init__(self, config: LLMconfig):
+    def __init__(self, config: BlockConfig):
         super().__init__()
         self.config = config
         
@@ -525,12 +532,12 @@ class MoE(nn.Module):
 
 class Block(nn.Module):
     """ A single Transformer block combining attention and MLP. """
-    def __init__(self, config:LLMconfig):
+    def __init__(self, config:BlockConfig, global_config:LLMconfig):
         super().__init__()
         self.is_moe = config.moe
         self.attn = Attention(config)
-        self.ln1  = LayerNorm(config, config.n_embd)
-        self.ln2  = LayerNorm(config, config.n_embd)
+        self.ln1  = LayerNorm(global_config, config.n_embd)
+        self.ln2  = LayerNorm(global_config, config.n_embd)
         if config.moe:
             self.moe = MoE(config)
         else:
@@ -555,7 +562,6 @@ class LLM(nn.Module):
     def __init__(self, config:LLMconfig):
         super().__init__()
         self.config = config
-        self.head_size = config.n_embd//config.n_head
         self.tkn_emb = nn.Embedding(config.vocab_size, config.n_embd)
         if config.pos_emb == 'learn':
             self.pos_emb = nn.Embedding(config.block_size, config.n_embd)
@@ -567,11 +573,11 @@ class LLM(nn.Module):
             pos_emb[:, 1::2] = torch.cos(position * div_term)
             self.register_buffer('pos_emb', pos_emb)
         elif config.pos_emb == 'rope':
-            self.register_buffer("freqs_cis", self._precompute_freqs_cis())
+            self.register_buffer("freqs_cis_layers", self._precompute_freqs_cis_layers())
     
         self.transformer = nn.ModuleDict(dict(
             drop = nn.Dropout(config.dropout),
-            h    = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h    = nn.ModuleList([Block(block_config, config) for block_config in config.layer_configs]),
             ln_f = LayerNorm(config, config.n_embd)))
         
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -581,18 +587,19 @@ class LLM(nn.Module):
         self.VAL_RUN=False
         if config.act_recomp: print("Using Activation Recomputation")
 
-    def _precompute_freqs_cis(self):
-        """Precomputes the rotary frequencies for RoPE."""
-        d = self.config.rope_head_dim if self.config.attn=='mla' else self.head_size
-        assert d % 2 == 0, "head dimension must be even"
-        
-        theta = 1.0 / (10000.0 ** (torch.arange(0, d, 2).float() / d)) # 1.0 / (base^(2i/d))
-        seq = torch.arange(self.config.block_size)
-        freqs = torch.outer(seq, theta)
-
-        # Convert to complex numbers: r * e^(i*theta)
-        freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
-        return freqs_cis
+    def _precompute_freqs_cis_layers(self):
+        """Precomputes the rotary frequencies for each layer for RoPE."""
+        freqs_cis_layers = []
+        for layer_config in self.config.layer_configs:
+            d = layer_config.rope_head_dim if layer_config.attn=='mla' else layer_config.n_embd//layer_config.n_head
+            assert d % 2 == 0, "head dimension must be even"
+            theta = 1.0 / (10000.0 ** (torch.arange(0, d, 2).float() / d)) # 1.0 / (base^(2i/d))
+            seq = torch.arange(self.config.block_size)
+            freqs = torch.outer(seq, theta)
+            # Convert to complex numbers: r * e^(i*theta)
+            freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+            freqs_cis_layers.append(freqs_cis)
+        return freqs_cis_layers
         
     def _init_weights(self, module):
         """Initializes model weights."""
@@ -671,11 +678,10 @@ class LLM(nn.Module):
         tkn_emb = self.tkn_emb(idx)  # Shape: (B, T, n_embd)
         
         x = tkn_emb # Default value for x
-        freqs_cis = None
 
         if self.config.pos_emb == 'rope':
-            freqs_cis = self.freqs_cis[start_pos : start_pos + T]
-        
+            freqs_cis_layers = [freqs_cis[start_pos : start_pos + T] for freqs_cis in self.freqs_cis_layers]
+
         elif self.config.pos_emb == 'learn':
             pos = torch.arange(start_pos, start_pos + T, dtype=torch.long, device=idx.device)
             x = tkn_emb + self.pos_emb(pos)
@@ -694,9 +700,9 @@ class LLM(nn.Module):
         for i, block in enumerate(self.transformer.h):
             # The block now returns an auxiliary loss from the MoE layer
             if not self.config.act_recomp: 
-                x, updated_kv_cache, aux_loss = block(x, freqs_cis, kv_caches[i], self.VAL_RUN)
+                x, updated_kv_cache, aux_loss = block(x, freqs_cis_layers[i], kv_caches[i], self.VAL_RUN)
             else : 
-                x, updated_kv_cache, aux_loss = checkpoint(block, x, freqs_cis, kv_caches[i], self.VAL_RUN)
+                x, updated_kv_cache, aux_loss = checkpoint(block, x, freqs_cis_layers[i], kv_caches[i], self.VAL_RUN)
 
             updated_kv_caches.append(updated_kv_cache)
             total_aux_loss += aux_loss
