@@ -16,12 +16,11 @@ def main(args):
         print(f"Error loading checkpoint: {e}")
         return
 
-    config = checkpoint['config']
+    ModelConfig = checkpoint['model_config']
 
     tokenizer = tiktoken.get_encoding("gpt2")
 
-    model = LLM(config)
-    model.to(device)
+    model = LLM(ModelConfig).to(device)
     model.load_state_dict(checkpoint['model_state'])
     model.eval()
 
