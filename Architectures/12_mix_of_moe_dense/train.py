@@ -354,10 +354,20 @@ if TrainingConfig.compile :
 # ___________ WANDB INITIALIZATION __________________
 
 if TrainingConfig.wandb_log:
-    import wandb
+    import wandb ; from copy import deepcopy
+
+    dummy_config = deepcopy(ModelConfig)
+    if dummy_config.CUSTOM_LAYERS:
+        for attr in ['up_dim', 'non_linearity','moe', 'n_exp', 'n_shared', 'n_act', 'aux_free', 'coeff', 'alpha', 'gamma']:
+            setattr(dummy_config, attr, 'custom')
+    
+    wandb_config = {'total_params':total, 'active_params':active, **vars(TrainingConfig), **vars(dummy_config)}
+
     wandb.init(project=TrainingConfig.wandb_project, 
                name=TrainingConfig.wandb_run_name,
-               config={'total':total, 'active':active, **vars(ModelConfig), **vars(TrainingConfig)})
+               config=wandb_config)
+    
+    del wandb_config, dummy_config # free up RAM
 
 #______________________________________________ TRAINING ______________________________________________
 
