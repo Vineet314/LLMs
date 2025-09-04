@@ -3,29 +3,29 @@
 # Test Training of a single CUSTOM LAYERS model using a JSONL file.
 
 # --- Training Configuration Arguments ---
-DATASET='fineweb'
+DATASET='tinystories'
 TOTAL_BATCH_SIZE_STR="2**11"
 BATCH_SIZE=2
-MAX_ITERS=500
+MAX_ITERS=5000
 LEARNING_RATE=3e-4
 WARMUP_STEPS=100
 GRAD_CLIP=1.0
-EVAL=false
+EVAL=true
 EVAL_INTERVAL=125
 EVAL_ITERS=20
-SAVE_MODEL=false
+SAVE_MODEL=true
 CKPT_INTERVAL=250 # perhpas a good number is max_iters//10?
 FILE_NAME="llm_model"
-ACT_RECOMP=true
-WANDB_LOG=false
+ACT_RECOMP=false
+WANDB_LOG=true
 WANDB_PROJECT="llms"
-WANDB_RUN_NAME="trial_run_w/o_mix"
+WANDB_RUN_NAME="4mla-moe+4gqa-mlp"
 
 # --- Model Configuration Arguments ---
 N_LAYER=8
 VOCAB_SIZE=50304
 BLOCK_SIZE=1024
-N_EMBD=256
+N_EMBD=384
 POS_EMB="rope" # Can be 'learn', 'sin', 'rope'
 DROPOUT=0.01
 NORM="rms" # Can be 'layer', 'rms'
