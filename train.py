@@ -7,7 +7,7 @@ import numpy as np
 from pathlib import Path
 from typing import Literal
 from time import perf_counter, time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from contextlib import nullcontext
 
 from model import LLM, LLMconfig, BlockConfig
@@ -75,34 +75,10 @@ ModelConfig = LLMconfig(
     vocab_size = 50304, 
     block_size = 2**10,
     n_embd = 256, 
-    pos_emb = 'rope',
-    
-    # MoE
-    moe = True,
-
-    up_dim = 384, 
-    non_linearity = 'swiglu',  
+    pos_emb = 'learn',
     dropout=0.0,
     n_layer = 6,
-    norm = 'rms',
-
-    n_exp = 16,
-    n_shared = 2,
-    n_act = 8,        ### INCLUDES THE SHARED EXPERTS
-
-    coeff=0.01,
-    aux_free=True,
-    alpha = 0.0001,
-    gamma = 0.001,
-
-    # Attention
-    attn = 'mla', 
-    n_head = 8,
-    n_kv_heads=4,
-    # MHLA
-    q_latent_dim = 32, 
-    kv_latent_dim = 32,
-    rope_head_dim = 16,
+    norm = 'layer',
     
     act_recomp=TrainingConfig.act_recomp,   # Link the activation recomputation from the TRaining params           
     CUSTOM_LAYERS=False,                    # Whether to use custom layer configuration
@@ -116,19 +92,19 @@ def parse_args():
     parser.add_argument('--dataset',       type=str,   default=TrainingConfig.dataset,       help='The data set to be used for training')
     parser.add_argument('--batch_size',    type=int,   default=TrainingConfig.batch_size,    help='Batch size for training')
     parser.add_argument('--max_iters',     type=int,   default=TrainingConfig.max_iters,     help='Maximum number of iterations for training')
-    parser.add_argument('--eval',         action='store_true', help='Wheter to perform Evalutions once a while')
     parser.add_argument('--eval_interval', type=int,   default=TrainingConfig.eval_interval, help='Interval for evaluation')
     parser.add_argument('--eval_iters',    type=int,   default=TrainingConfig.eval_iters,    help='Number of iterations for evaluation')
     parser.add_argument('--learning_rate', type=float, default=TrainingConfig.learning_rate, help='Learning rate for training')
     parser.add_argument('--warmup_steps',  type=int,   default=TrainingConfig.warmup_steps,  help='Number of warmup steps for learning rate')
-    parser.add_argument('--grad_clip',     type=float,  default=TrainingConfig.grad_clip,    help='Gradient Clip value')
-    parser.add_argument('--save_model',   action='store_true', help='Whether to save the model after training')
+    parser.add_argument('--grad_clip',     type=float, default=TrainingConfig.grad_clip,     help='Gradient Clip value')
     parser.add_argument('--ckpt_interval', type=int,   default=TrainingConfig.ckpt_interval, help='Interval for checkpointing')
-    parser.add_argument('--file_name',     type=str, default=TrainingConfig.file_name, help='Name of the checkpoint to be saved')
+    parser.add_argument('--file_name',     type=str,   default=TrainingConfig.file_name,     help='Name of the checkpoint to be saved')
+    parser.add_argument('--wandb_project', type=str,   default=TrainingConfig.wandb_project, help='Weights and Biases project name')
+    parser.add_argument('--wandb_run_name',type=str,   default=TrainingConfig.wandb_run_name, help='Weights and Biases run name')
+    parser.add_argument('--eval',         action='store_true', help='Wheter to perform Evalutions once a while')
     parser.add_argument('--act_recomp',   action='store_true', help='Whether to use (selective) activation recomputation')
+    parser.add_argument('--save_model',   action='store_true', help='Whether to save the model after training')
     parser.add_argument('--wandb_log',    action='store_true', help='Whether to log training to Weights and Biases')
-    parser.add_argument('--wandb_project',type=str,   default=TrainingConfig.wandb_project, help='Weights and Biases project name')
-    parser.add_argument('--wandb_run_name',type=str,  default=TrainingConfig.wandb_run_name, help='Weights and Biases run name')
 
     # Model Parameters
     parser.add_argument('--vocab_size',  type=int,   default=ModelConfig.vocab_size,  help='Vocabulary size for the model')
@@ -139,113 +115,87 @@ def parse_args():
     parser.add_argument('--dropout',     type=float, default=ModelConfig.dropout,     help='Dropout rate for the model')
     parser.add_argument('--norm',        type=str,   default=ModelConfig.norm,        help='Type of normalization (layer, rms)')
     # MLP Params
-    parser.add_argument('--up_dim',      type=int,   default=ModelConfig.up_dim,      help='Up dimension for the Expert in the model')
-    parser.add_argument('--non_linearity',type=str,   default=ModelConfig.non_linearity,help='Non-linearity for the Expert in the model')
+    parser.add_argument('--up_dim',      type=int,   default=512,    help='Up dimension for the Expert in the model')
+    parser.add_argument('--non_linearity',type=str,  default='gelu', help='Non-linearity for the Expert in the model')
     # MoE Params
-    parser.add_argument('--n_exp',       type=int,   default=ModelConfig.n_exp,       help='Number of Experts in the model')
-    parser.add_argument('--n_shared',    type=int,   default=ModelConfig.n_shared,    help='Number of Shared Experts in the model')
-    parser.add_argument('--n_act',       type=int,   default=ModelConfig.n_act,       help='Number of Active Experts in the model')
-    parser.add_argument('--coeff',       type=float, default=ModelConfig.coeff,       help='Aux Loss Coefficient for the MoE if not using Aux Free')
-    parser.add_argument('--alpha',       type=float, default=ModelConfig.alpha,       help='Complementry Loss Coefficient for the MoE if using Aux Free')
-    parser.add_argument('--gamma',       type=float, default=ModelConfig.gamma,       help='Bias Update speed in Aux loss free MoE if using Aux Free')
+    parser.add_argument('--n_exp',       type=int,   default=None,   help='Number of Experts in the model')
+    parser.add_argument('--n_shared',    type=int,   default=None,   help='Number of Shared Experts in the model')
+    parser.add_argument('--n_act',       type=int,   default=None,   help='Number of Active Experts in the model')
+    parser.add_argument('--coeff',       type=float, default=None,   help='Aux Loss Coefficient for the MoE if not using Aux Free')
+    parser.add_argument('--alpha',       type=float, default=None,   help='Complementry Loss Coefficient for the MoE if using Aux Free')
+    parser.add_argument('--gamma',       type=float, default=None,   help='Bias Update speed in Aux loss free MoE if using Aux Free')
     # Attention Params
-    parser.add_argument('--attn',        type=str,   default=ModelConfig.attn,        help='Type of attention mechanism (mha, mqa, gqa, mla)')
-    parser.add_argument('--n_head',      type=int,   default=ModelConfig.n_head,      help='Number of attention heads in the model')
-    parser.add_argument('--n_kv_heads',  type=int,   default=ModelConfig.n_head,      help='Number of KV heads in the model (only for gqa/mqa)')
-    parser.add_argument('--q_latent_dim',  type=int, default=ModelConfig.q_latent_dim,help='Query latent dimension (only for mla)')
-    parser.add_argument('--kv_latent_dim', type=int, default=ModelConfig.kv_latent_dim,help='KV latent dimension (only for mla)')
-    parser.add_argument('--rope_head_dim', type=int, default=ModelConfig.rope_head_dim,help='RoPE head dimension (only for mla)')
+    parser.add_argument('--attn',        type=str,   default='mha',  help='Type of attention mechanism (mha, mqa, gqa, mla)')
+    parser.add_argument('--n_head',      type=int,   default=8,      help='Number of attention heads in the model')
+    parser.add_argument('--n_kv_heads',  type=int,   default=8,      help='Number of KV heads in the model (only for gqa/mqa)')
+    parser.add_argument('--q_latent_dim',  type=int, default=None,   help='Query latent dimension (only for mla)')
+    parser.add_argument('--kv_latent_dim', type=int, default=None,   help='KV latent dimension (only for mla)')
+    parser.add_argument('--rope_head_dim', type=int, default=None,   help='RoPE head dimension (only for mla)')
     
     parser.add_argument('--total_batch_size_str', type=str, default=str(TrainingConfig.total_batch_size), help='Total batch size for training passed in as a string expression')
     parser.add_argument('--moe',        action='store_true', help='Whether to use Mixture of Experts in the model')
     parser.add_argument('--aux_free',   action='store_true', help='Whether to use Aux Loss Free MoE')
 
     # Custom Layer configuration
-    # list pattern : [n_embd, pos_emb, attn, n_head, n_kv_heads, q_latent_dim, kv_latent_dim, rope_head_dim, 'moe/mlp', up_dim, non_linearity, dropout, n_exp, n_shared, n_act, aux_free, coeff alpha, gamma]
+    # dict_keys(['attn', 'n_head', 'moe', 'up_dim', 'non_linearity', 'dropout', 'n_kv_heads', 'q_latent_dim', 'kv_latent_dim', 'rope_head_dim', 'n_exp', 'n_shared', 'n_act', 'coeff', 'aux_free', 'alpha', 'gamma'])
     # OMG THIS SPINS MY HEAD
-    # if passing in even a single custom layer, make sure to pass in all layers arguments, albeit with same values
-    # if passing in custom layers, you need not pass in n_layer, and other FFN arguments seperately, as they will be inferred from the layer configs
-    # However, you still need to pass in the hyperparams, like coeff for ALL layers, albeit the same value
+    # for simple LLMs with all layers having same params, pass-in normally.
+    # if passing in custom layers, you still need to pass in `n_layer`. Other FFN/ATTN arguments will be inferred from the layer configs.
+    # ONLY one of the following is to be provided if using custom layers configurations. 
     parser.add_argument('--layer_configs', nargs='+', default=None, help='List of layer configs. Refer to `parameters.md` for details.')
+    parser.add_argument('--layer_configs_jsonl', type=str, default=None, help='Path for the JSON file containing the layer configurations')
 
     return parser.parse_args()
 
 args = parse_args()
 
-for key, value in vars(args).items():
-    # need to eval the total_batch_size to get the grad_accum_steps
-    if key == 'total_batch_size_str':
-        value = eval(value)
-        setattr(TrainingConfig, 'total_batch_size', value)
-    elif key == 'act_recomp':
-        setattr(ModelConfig, key, value); setattr(TrainingConfig, key, value)
-    elif key == 'layer_configs' and value is not None:
+model_params    = [param.name for param in fields(LLMconfig)]
+block_params    = [param.name for param in fields(BlockConfig)]
+training_params = [param.name for param in fields(Trainconfig)]
+
+single_layer_config = {param:None for param in block_params} # for simple LLM
+for key,val in vars(args).items():
+    if   key == 'act_recomp' : setattr(ModelConfig, key, val); setattr(TrainingConfig, key, val)
+    elif key == 'total_batch_size_str': value = eval(val); setattr(TrainingConfig, 'total_batch_size', value)
+    
+    elif key in training_params: setattr(TrainingConfig, key, val)
+    elif key in model_params: setattr(ModelConfig, key, val)
+    
+    elif key == 'layer_configs' and val is not None:
         setattr(ModelConfig, 'CUSTOM_LAYERS', True)
-        layers = value
-    else:
-        if isinstance(value, str) and key !='non_linearity':
-            value = value.lower().strip()
-        if hasattr(TrainingConfig, key):
-            setattr(TrainingConfig, key, value)
-        else:
-            setattr(ModelConfig, key, value)
+        assert vars(args)['layer_configs_jsonl'] is None, "\nOnly one of `layer_configs` or `layer_configs_jsonl` can be passed-in."
+        if isinstance(val, list) and all([isinstance(valoo, dict) for valoo in val]): 
+            multi_layer_configs:list[dict] = val
+        else: 
+            raise TypeError(f"Expected a python list of dictionaries")
+    
+    elif key == 'layer_configs_jsonl' and val is not None:
+        setattr(ModelConfig, 'CUSTOM_LAYERS', True)
+        assert vars(args)['layer_configs'] is None, "\nOnly one of `layer_configs` or `layer_configs_jsonl` can be passed-in."
+        import json; from pathlib import Path
+        with open(Path(val), "r", encoding="utf-8") as f: multi_layer_configs = [json.loads(line) for line in f]
+    
+    else: # means block params are passed seperatley, intened for simple-LLM
+        # Homogeneous model.
+        setattr(ModelConfig, 'CUSTOM_LAYERS', False)
+        if key in block_params: single_layer_config[key] = val
 
-if ModelConfig.CUSTOM_LAYERS:
-    # list pattern : ['n_embd', 'moe/mlp', up_dim, non_linearity, dropout, n_exp, n_shared, n_act, aux_free, coeff alpha, gamma]
-    layer_configs = []
-    for layer_str in layers:
-        parts:list[str] = layer_str.split(':')
-        if parts[0].lower() == 'mlp':
-            layer_configs.append(BlockConfig(
-                n_embd= ModelConfig.n_embd, # same for all layers
-                moe= False, # True for MoE, False for MLP
-                up_dim= int(parts[1].strip()),
-                non_linearity= parts[2].strip(),
-                dropout= float(parts[3].strip())))
-
-        elif parts[0].lower() == 'moe':
-            layer_configs.append(BlockConfig(
-                n_embd= ModelConfig.n_embd, # same for all layers
-                moe= True, # True for MoE, False for MLP
-                up_dim= int(parts[1].strip()),
-                non_linearity= parts[2].strip(),
-                dropout= float(parts[3].strip()),
-                n_exp= int(parts[4].strip()),
-                n_shared= int(parts[5].strip()),
-                n_act= int(parts[6].strip()),
-                aux_free= parts[7].strip().lower() in ['true', '1', 'yes'],
-                coeff= float(parts[8].strip()),
-                alpha= float(parts[9].strip()),
-                gamma= float(parts[10].strip())))
-        else:
-            raise ValueError(f"Layer type {parts[0]} not recognized. Use 'mlp' or 'moe'")
-
-    assert ModelConfig.n_layer == len(layer_configs), f"Number of layers {ModelConfig.n_layer} must match the length of layer_configs {len(layer_configs)}"
-    ModelConfig.layer_configs = layer_configs
+if not ModelConfig.CUSTOM_LAYERS: # for simple LLM
+    multi_layer_configs = [single_layer_config for _ in range(ModelConfig.n_layer)]
 else:
-    ModelConfig.layer_configs = [BlockConfig(
-        n_embd= ModelConfig.n_embd,
-        moe= ModelConfig.moe,
-        up_dim= ModelConfig.up_dim,
-        non_linearity= ModelConfig.non_linearity,
-        dropout= ModelConfig.dropout,
-        n_exp= ModelConfig.n_exp,
-        n_shared= ModelConfig.n_shared,
-        n_act= ModelConfig.n_act,
-        aux_free= ModelConfig.aux_free,
-        coeff= ModelConfig.coeff,
-        alpha= ModelConfig.alpha,
-        gamma= ModelConfig.gamma) for _ in range(ModelConfig.n_layer)]
+    # `multi_layer_config` varible exists and is of the type list[dict]
+    assert ModelConfig.n_layer == len(multi_layer_configs), f"\nNumber of layers ({ModelConfig.n_layer}) must match the length of layer_configs ({len(multi_layer_configs)})"
 
-if ModelConfig.attn == 'mha':
-    ModelConfig.n_kv_heads = ModelConfig.n_head
-elif ModelConfig.attn == 'mqa':
-    ModelConfig.n_kv_heads = 1
-elif ModelConfig.attn == 'mla':
-    req = ModelConfig.q_latent_dim is not None and ModelConfig.kv_latent_dim is not None
-    assert req, "Either q_latent_dim or kv_latent_dim is missing"
-    if ModelConfig.pos_emb == 'rope':
-        assert ModelConfig.rope_head_dim is not None, "Need dim of Rotary heads"
+args = [ModelConfig.n_embd, ModelConfig.pos_emb]
+ModelConfig.layer_configs = [BlockConfig(*args, **kwargs) for kwargs in multi_layer_configs]
+
+# run a few checks 
+for l_num, layer in enumerate(ModelConfig.layer_configs):
+    if layer.attn == 'mla':
+        req = layer.q_latent_dim is not None and layer.kv_latent_dim is not None
+        assert req, f"Either q_latent_dim or kv_latent_dim is missing in layer{l_num}"
+        if ModelConfig.pos_emb == 'rope':
+            assert layer.rope_head_dim is not None, f"Need dim of Rotary heads in layer{l_num}" 
 
 # _______________ DATASET _________________
 
@@ -295,7 +245,7 @@ class DataLoader:
             y = y.to(self.device)
         return x, y
 
-data_dir = os.path.join('../../data', TrainingConfig.dataset)
+data_dir = os.path.join('data', TrainingConfig.dataset)
 print(f"Using Dataset {Path(data_dir).stem}")
 train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path=os.path.join(data_dir, "train.bin"), device=device)
 val_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path=os.path.join(data_dir, "val.bin"), device=device)
@@ -359,8 +309,7 @@ if TrainingConfig.wandb_log:
 
     dummy_config = deepcopy(ModelConfig)
     if dummy_config.CUSTOM_LAYERS:
-        for attr in ['up_dim', 'non_linearity','moe', 'n_exp', 'n_shared', 'n_act', 'aux_free', 'coeff', 'alpha', 'gamma']:
-            setattr(dummy_config, attr, 'custom')
+        for attr in block_params: setattr(dummy_config, attr, 'custom')
     
     wandb_config = {'total':total, 'active':active, **vars(TrainingConfig), **vars(dummy_config)}
 
