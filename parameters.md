@@ -98,7 +98,7 @@ These parameters are only active if `--moe` is passed in (i.e., set to `True`).
 ### Custom Layer Configuration
 
 For building heterogeneous models where each layer can have a different configuration. If used, the model is considered `CUSTOM_LAYERS=True`.
-***ONLY ONE OF THESE IS TO BE PROVIDED***
+***ATMOST ONE OF THESE IS TO BE PROVIDED***
 
 | Parameter | Type | Description |
 | :--- | :--- | :--- |
