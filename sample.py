@@ -8,7 +8,7 @@ from typing import Literal
 
 @dataclass
 class Trainconfig:
-    dataset : str | Literal['shakespeare', 'tinystories', 'fineweb']
+    dataset : str | Literal['shakespeare', 'tinystories', 'fineweb', 'wikitext']
     total_batch_size : int
     batch_size : int
     max_iters : int
@@ -67,10 +67,10 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Generate text using a trained LLM model with tiktoken.")
-    parser.add_argument('--model_path',     type=str,   default='llm_model_ckpt.pt', help='Path to the saved model checkpoint (.pt file)')
+    parser.add_argument('--model_path',     type=str,   default='llm_model_best.pt', help='Path to the saved model checkpoint (.pt file)')
     parser.add_argument('--prompt',         type=str,   default='Once upon a time',  help='The starting prompt for text generation.')
     parser.add_argument('--max_new_tokens', type=int,   default=300,            help='Maximum number of new tokens to generate.')
-    parser.add_argument('--temperature',    type=float, default=0.1,            help='Generation temperature. >1.0 for more creative, <1.0 for more deterministic. Do not set to 0.')
+    parser.add_argument('--temperature',    type=float, default=0.9,            help='Generation temperature. >1.0 for more creative, <1.0 for more deterministic. set to 0 for greedy sampling.')
     parser.add_argument('--top_k',          type=int,   default=200,            help='Top-k sampling. Limits sampling to the k most likely tokens.')
     
     args = parser.parse_args()

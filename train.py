@@ -53,8 +53,8 @@ class Trainconfig:
     wandb_run_name : str
 
 TrainingConfig = Trainconfig(
-    dataset='tinystories',
-    total_batch_size = 2**11,
+    dataset='shakespeare',
+    total_batch_size = 2**10,
     batch_size = 2**1, # how many independent sequences will we process in parallel?
     max_iters = 500,
     eval = False,
@@ -75,7 +75,7 @@ TrainingConfig = Trainconfig(
 ModelConfig = LLMconfig(
     # token params
     vocab_size = 50304, 
-    block_size = 2**10,
+    block_size = 2**9,
     n_embd = 256, 
     pos_emb = 'learn',
     dropout=0.0,
@@ -117,7 +117,7 @@ def parse_args():
     parser.add_argument('--dropout',     type=float, default=ModelConfig.dropout,     help='Dropout rate for the model')
     parser.add_argument('--norm',        type=str,   default=ModelConfig.norm,        help='Type of normalization (layer, rms)')
     # MLP Params
-    parser.add_argument('--up_dim',      type=int,   default=512,    help='Up dimension for the Expert in the model')
+    parser.add_argument('--up_dim',      type=int,   default=256,    help='Up dimension for the Expert in the model')
     parser.add_argument('--non_linearity',type=str,  default='gelu', help='Non-linearity for the Expert in the model')
     # MoE Params
     parser.add_argument('--n_exp',       type=int,   default=None,   help='Number of Experts in the model')
@@ -127,7 +127,7 @@ def parse_args():
     parser.add_argument('--alpha',       type=float, default=None,   help='Complementry Loss Coefficient for the MoE if using Aux Free')
     parser.add_argument('--gamma',       type=float, default=None,   help='Bias Update speed in Aux loss free MoE if using Aux Free')
     # Attention Params
-    parser.add_argument('--attn',        type=str,   default='mha',  help='Type of attention mechanism (mha, mqa, gqa, mla)')
+    parser.add_argument('--attn',        type=str,   default='mqa',  help='Type of attention mechanism (mha, mqa, gqa, mla)')
     parser.add_argument('--n_head',      type=int,   default=8,      help='Number of attention heads in the model')
     parser.add_argument('--n_kv_heads',  type=int,   default=8,      help='Number of KV heads in the model (only for gqa/mqa)')
     parser.add_argument('--q_latent_dim',  type=int, default=None,   help='Query latent dimension (only for mla)')
