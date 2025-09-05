@@ -1,4 +1,5 @@
 numpy
 tiktoken
 datasets
+wandb
 # install pytorch from https://pytorch.org/get-started/locally/
