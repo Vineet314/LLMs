@@ -30,7 +30,7 @@ POS_EMB="rope" # Can be 'learn', 'sin', 'rope'
 DROPOUT=0.01
 NORM="rms" # Can be 'layer', 'rms'
 
-CONFIG_PATH="layer_configs.jsonl"
+CONFIG_PATH="tests/test_layer_configs.jsonl"
 
 # Construct the command
 python train.py \
