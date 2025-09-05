@@ -18,7 +18,6 @@ These parameters control the training loop, optimization, and evaluation process
 | `--warmup_steps` | `100` | int | Number of initial steps to linearly warm up the learning rate from 0 to its maximum value. |
 | `--grad_clip` | `1.0` | float | The value for gradient clipping to prevent exploding gradients. A value of `0.0` disables it. |
 | `--act_recomp` | `False` | bool | If `True`, uses activation recomputation during the backward pass to save memory. |
-| `--compile` | `True`* | bool | If `True`, compiles the model using `torch.compile` for a potential speed-up. (*Defaults to `False` on non-POSIX systems like Windows). |
 
 ### Evaluation
 
