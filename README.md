@@ -1,38 +1,50 @@
 # Large Language Models (LLMs)
 
-Build a custom LLM, and then train it. 
+Build a custom LLM, and then train it.
+Written entirely in python, using just PyTorch.
 
-For now, training can be done one of 3 datsets: Tiny shakespeare (~304k tokens), TinyStories(~470M tokens), FineWeb-Edu (10B tokens).
+For now, training can be done one of 4 datsets: [Tiny shakespeare](https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt) (~304k tokens), [WikiText](https://huggingface.co/datasets/Salesforce/wikitext/tree/main/wikitext-103-v1)(~118M tokens), [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories)(~470M tokens), [FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) (10B tokens).
 
-Supported Model Architectures:
-   - ***Positional Encodings*** : set `pos_emb` to one of `learn`, `sin`, `rope`.  Default : `rope` 
-   - ***Attention Mechanisms*** : set `attn` to one of `mha`, `mqa`, `gqa`, `mla`. Default : `mla`
-   - ***Model Sparsity*** : set `--moe` flag for MoE, `--aux_free` for Auxilary loss free load balancing
+Key Architectures:
+   - Attention mechanisms : Multi Head, Multi Query, Grouped Query and Multi Head Latent Attention. All have KV caching enabled by default.  
+   - Feed Forward Network : Multi-Layer Perceptrons, Mixture of Experts (with or without DeepSeek's [auxiliary-loss-free load balancing](https://arxiv.org/pdf/2408.15664))
+   - Heterogeneous models : Why keep all the transformer blocks same? Vary attention mechanisms, FFN types *within* the same model. Pass in `--layer_configs`. 
    - Check *[parameters](https://github.com/Vineet314/LLMs/blob/main/parameters.md)* for a full list of Model and training Parameters.
 
-## Quickstart ⚡
-On a Windows Laptop with a CPU you can run:
-```powershell
-PS C:\> python train.py --dataset='shakespeare' --attn='mqa' --pos_emb='sin' --batch_size=1 --block_size=256 --total_batch_size_str='2**8'
-```
-Or a slightly complex one, if you have a GPU:
-```powershell
-PS C:\> python train.py --max_iters=5000 --save_model --attn='gqa' --pos_emb='rope' --n_head=16 --n_kv_heads=4 --eval --moe --aux_free --save_model
-```
-It is highly suggest to run it on a Linux-based OS, like Ubuntu, or on WSL as it enables you to use the Pytorch compiler. 
-Check out `train.sh` if you want to make any changes in settings and run:
-```bash
-~$ chmod +x train.sh
-~$ ./train.sh
-# Or you can also change settings directly in CLI:
-# python train.py \
-# --eval --save_model \
-# --attn='mla' --pos_emb='rope' \
-# --max_iters=5000
-```
+## Stepwise Quickstart
+1. Install [PyTorch](https://pytorch.org/get-started/locally/)
+2. Run `pip install -r requirements.txt` (a virtual environment is highly suggested)
+3. Choose one of the available datasets. cd into the data directorty and run `python prepare.py`
+4. For logging, run `wandb login` and do the needful.
+5. Then,
+   - On a Windows Laptop with a CPU you can run:
+   ```powershell
+   PS> python train.py
+   ```
+   - Or a slightly complex one, if you have a GPU:
+   ```powershell
+   PS> python train.py --max_iters=5000 --save_model --attn='gqa' --pos_emb='rope' --n_head=16 --n_kv_heads=4 --eval --moe --aux_free --save_model
+   ```
+   - It is highly suggest to run it on a Linux-based OS, like Ubuntu, or on WSL as it enables you to use the Pytorch compiler. 
+   Check out `train.sh` if you want to make any changes in settings and run:
+   ```bash
+   ~$ ./train.sh
+   ```
+6. Research. Change parameters, mechanisms. Sky is the limit. Document your findings.
+7. Sample from your model. Run: 
+   ```bash
+   python sample.py \
+      --model_path="llm_model_best.pt" \
+      --prompt="why are we doing this" \
+      --max_new_tokens=500 \
+      --temperature=0.9 \
+      --top_k=100
+   ```
 
-## Architectures 🏢
-> Dev environement for implementing newer model architectures, starting from [NanoGPT](https://github.com/karpathy/nanoGPT) as the Base. 
+
+## Architectures
+> Dev environement for implementing newer model architectures, starting from [NanoGPT](https://github.com/karpathy/nanoGPT) as the Base.
+> Might Remove this dir totally.
 
 This repository contains examples and scripts for training Large Language Models (LLMs) using PyTorch.
 It includes various implementations of LLMs, focusing on understanding the architecture and training techniques.
@@ -52,27 +64,26 @@ For training on a single GPU, this project firstly aims at understanding the cor
   - `deepseek_moe` : Upgrades the standard MoE architecture along the lines of [DeepSeek MoE](https://arxiv.org/abs/2401.06066), mainly the Fine-Grained Expert Segmentation and Shared Expert Isolation.
   - `aux_loss_free_moe` : Replaces the Aux Loss by a much smaller complimentry loss, introducing bias correction in router logits. Introduced in [DeepSeek V3](https://arxiv.org/abs/2412.19437)
 
-## Experiments 🔬
+## Experiments 
 > Research Environment; search for optimal configuration, parameters and hyper parameters.
    - Exp1 : Comparison of different Attention Mechanisms (GQA, MLA), each with RoPE and SinusoidalPositional Embedding. (4 dense models) 
    - Exp2 : Previous experiment, but with auxiliary loss free MoE models. 
-   - Exp3 : TBD
+   - Exp3 : Compare simple LLM performence with heterogeneous LLMs
 
-## Multi GPU training 🛜
+## Multi GPU training and DeepSpeed
+[DeepSpeed](deepspeed.ai) provides a robust framework for training optimization, for single-node and multi-node systems. Yet to be explored.
+
 For training on multiple GPUs, check out my repository [Distributed Pytorch](https://github.com/Vineet314/Distributed-Pytorch) which explores distributed training.
 For a try, one can run the `kaggle-train.py` script as per the instructions given in the docstring. Or, it can be run on a single-node multi-gpu server as follows: 
 ```
 # use kaggle only for Demo
-!torchrun --standalone --nproc_per_node=8 train.py --max_iters=5000 --moe --aux_free --eval --eval_interval=20 --max_iters=150
+!torchrun --standalone --nproc_per_node=8 kaggle-train.py --max_iters=5000 --moe --aux_free --eval --eval_interval=20 --max_iters=150
 ```
 ## TODO
+- Make and use own tokenizer instead of `tiktoken`
 - Run tests using different configurations (and perhaps make a script for that)
+- Explore SLURM for experimentation.
 - Explore Parallelism mainly on the other repo
-- ~~Change the Dataloader, use better Datasets for training~~
-- ~~Fix the eval in training script~~
-- ~~Add a sample.py and bash script~~
-- Make and use own tokenizer instead of `tiktoken` 
 - Add ALiBi Positional encodings
-- ~~Explore and implement MoE architectures~~
 - Implement Flash MLA as per [deepseek-ai/FlashMLA](https://github.com/deepseek-ai/FlashMLA)
 - (Much Later) Explore fine tuning
