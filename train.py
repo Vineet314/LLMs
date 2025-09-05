@@ -408,10 +408,10 @@ for iter in range(TrainingConfig.max_iters+1):
 
         model_state = model._orig_mod.state_dict() if hasattr(model, '_orig_mod') else model.state_dict()
         checkpoint = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'model_state': model_state}
-        stats      = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'losses':loss_stats, 'total_params':total, 'active_params':active}
+        # stats      = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'losses':loss_stats, 'total_params':total, 'active_params':active}
 
         torch.save(checkpoint, TrainingConfig.file_name+'_best.pt')
-        torch.save(stats, TrainingConfig.file_name+'_best_stats.pt')
+        # torch.save(stats, TrainingConfig.file_name+'_best_stats.pt')
         
         del checkpoint, stats, loss_stats # del big variables from RAM
         print(f"At iter {iter} : val loss {losses['val']:.4f} - New Best Model saved")
