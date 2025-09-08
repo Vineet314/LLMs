@@ -17,7 +17,7 @@ SAVE_MODEL=true  # i'd die if this were set to false
 CKPT_INTERVAL=1000
 FILE_NAME="llm_model"
 ACT_RECOMP=true
-WANDB_LOG=true
+WANDB_LOG=false
 WANDB_PROJECT="llms"
 WANDB_RUN_NAME="fineweb_moe_16exp_150k"
 
@@ -60,7 +60,6 @@ python train.py \
     --eval_interval $EVAL_INTERVAL \
     --eval_iters $EVAL_ITERS \
     --file_name $FILE_NAME \
-    --wandb_log $WANDB_LOG \
     --wandb_project $WANDB_PROJECT \
     --wandb_run_name $WANDB_RUN_NAME \
     --ckpt_interval $CKPT_INTERVAL \
@@ -85,8 +84,9 @@ python train.py \
     --alpha $ALPHA \
     --gamma $GAMMA \
     --coeff $CEOFF \
-    $( [ "$SAVE_MODEL" = true ] && echo "--save_model" ) \
-    $( [ "$EVAL" = true ] && echo "--eval" ) \
     $( [ "$MOE" = true ] && echo "--moe" ) \
+    $( [ "$AUX_FREE" = true ] && echo "--aux_free" ) \
+    $( [ "$EVAL" = true ] && echo "--eval" ) \
     $( [ "$ACT_RECOMP" = true ] && echo "--act_recomp" ) \
-    $( [ "$AUX_FREE" = true ] && echo "--aux_free" )
+    $( [ "$SAVE_MODEL" = true ] && echo "--save_model" ) \
+    $( [ "$WANDB_LOG" = true ] && echo "--wandb_log" ) \
