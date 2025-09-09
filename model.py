@@ -557,6 +557,12 @@ class Block(nn.Module):
 
         return x, updated_kv_cache, aux_loss
 
+class _transformer_container(nn.Module):
+    '''For type checking in LLM class'''
+    drop:nn.Dropout
+    h:nn.ModuleList[Block]
+    ln_f:LayerNorm 
+
 class LLM(nn.Module):
     """ A simple Large language model """
     def __init__(self, config:LLMconfig):
@@ -578,7 +584,7 @@ class LLM(nn.Module):
             del fcl
             # self.register_buffer("freqs_cis_layers", self._precompute_freqs_cis_layers(), persistent=False)
     
-        self.transformer = nn.ModuleDict(dict(
+        self.transformer:_transformer_container = nn.ModuleDict(dict(
             drop = nn.Dropout(config.dropout),
             h    = nn.ModuleList([Block(block_config, config) for block_config in config.layer_configs]),
             ln_f = LayerNorm(config, config.n_embd)))
@@ -669,7 +675,7 @@ class LLM(nn.Module):
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate)
         return optimizer
 
-    def forward(self, idx: torch.Tensor, targets=None, kv_caches=None):
+    def forward(self, idx: torch.Tensor, targets:torch.Tensor|None=None, kv_caches:list[torch.Tensor]|None=None):
         B, T = idx.size()
         start_pos = 0
 
@@ -718,7 +724,7 @@ class LLM(nn.Module):
         x = self.transformer.ln_f(x)
 
         if targets is not None:
-            logits = self.lm_head(x)
+            logits:torch.Tensor = self.lm_head(x)
             main_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
             # Add the accumulated auxiliary loss to the main loss
             # We divide by the number of layers because loss is accumulated from each MoE block
