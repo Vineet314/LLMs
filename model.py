@@ -560,7 +560,7 @@ class Block(nn.Module):
 class _transformer_container(nn.Module):
     '''For type checking in LLM class'''
     drop:nn.Dropout
-    h:nn.ModuleList[Block]
+    h:list[Block]
     ln_f:LayerNorm 
 
 class LLM(nn.Module):
