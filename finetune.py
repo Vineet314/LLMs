@@ -5,14 +5,65 @@ import tiktoken
 
 from peft import get_peft_model, LoraConfig, TaskType
 from torch.utils.data import Dataset, DataLoader
-from model import LLM, LLMconfig, BlockConfig
+from model import LLM, BlockConfig
 from torch.nn.utils.rnn import pad_sequence 
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, asdict
+from typing import Literal, Optional
 
 data_path = "data/open_assistant/data.jsonl"
 
 # needed to load checkpoint
+@dataclass
+class BlockConfig:
+    # global
+    n_embd: int
+    pos_emb: str | Literal['learn', 'sin', 'rope']
+    dropout: float
+    # attn
+    attn: str | Literal['mha', 'mqa', 'gqa', 'mla']
+    n_head: int
+    # ffn
+    moe: bool
+    up_dim: int
+    non_linearity: str | Literal['elu', 'lrelu', 'relu', 'gelu', 'swish', 'mish', 'silu','selu', 'celu', 'tanh', 'swiglu', 'sigmoid']
+
+    # Optional fields with default as None
+    # attn
+    n_kv_heads: Optional[int] = None
+    q_latent_dim:  Optional[int] = None
+    kv_latent_dim: Optional[int] = None
+    rope_head_dim: Optional[int] = None
+    # ffn
+    n_exp:    Optional[int] = None
+    n_shared: Optional[int] = None
+    n_act:    Optional[int] = None
+    coeff:    Optional[float] = None
+    aux_free: Optional[bool] = None
+    alpha:    Optional[float] = None
+    gamma:    Optional[float] = None
+
+@dataclass
+class LLMconfig:
+    # token params
+    vocab_size : int
+    block_size : int
+    n_embd : int
+    pos_emb : str | Literal['learn','sin','rope']
+
+    # model params
+    dropout : float
+    n_layer : int
+    norm : str | Literal['layer','rms']
+
+    act_recomp : bool  # more of a training param, but the best way to integrate that is to just add it here
+    CUSTOM_LAYERS : bool
+    layer_configs : list[BlockConfig] | None # dict keys = ['n_embd', 'moe/mlp', up_dim, non_linearity, dropout, n_exp, n_shared, n_act, aux_free, coeff alpha, gamma]
+
+    model_type:str = "custom_model"
+
+    def get(self, attr):
+        return getattr(self, attr, None)
+
 @dataclass
 class Trainconfig:
     dataset : str | Literal['shakespeare', 'tinystories', 'fineweb', 'wikitext']
@@ -48,11 +99,23 @@ def load_pretrained_model(checkpoint_path, device):
     # print(f"Loading checkpoint from: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
-    model_config = checkpoint['model_config']
-    model = LLM(model_config).to(device)
+    ModelConfig:LLMconfig = checkpoint['model_config']
+    new_config = LLMconfig(
+        vocab_size=ModelConfig.vocab_size,
+        block_size=ModelConfig.block_size,
+        n_embd=ModelConfig.n_embd,
+        pos_emb=ModelConfig.pos_emb,
+        dropout=ModelConfig.dropout,
+        n_layer=ModelConfig.n_layer,
+        norm=ModelConfig.norm,
+        act_recomp=ModelConfig.act_recomp,
+        CUSTOM_LAYERS=ModelConfig.CUSTOM_LAYERS,
+        layer_configs=ModelConfig.layer_configs,
+        model_type="custom"
+    )
+    model = LLM(new_config).to(device)
     model.load_state_dict(checkpoint['model_state'])
-    
-    return model, model_config
+    return model, new_config
 
 # --- Tokenizer and Special Tokens ---
 
@@ -116,14 +179,14 @@ def collate_fn(batch):
 if __name__ == '__main__':
     config = FineTuneConfig(
         base_model= "demo_model_best.pt",
-        data_path="data/open_assistant/data.jsnol",
+        data_path="data/open_assistant/data.jsonl",
         batch_size=2,
         max_iters=2000,
         learning_rate=5e-4,
         lora_r=16,
         lora_alpha=32)
     
-    model, model_config = load_pretrained_model(config.base_model, "cuda")
+    model, ModelConfig = load_pretrained_model(config.base_model, "cuda")
     
     # Apply LoRA
     print("Applying LoRA...")
@@ -137,7 +200,6 @@ if __name__ == '__main__':
     model.to("cuda")
     
     # 5. Setup Dataloader
-    print("Setting up dataloader...")
     train_dataset = ChatDataset(config.data_path, prepare_sample)
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, collate_fn=collate_fn)
     
@@ -145,14 +207,13 @@ if __name__ == '__main__':
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=0.1, fused=True)
     model.train()
     
-    print("Starting fine-tuning...")
     iter_num = 0
     for epoch in range(5): # A simple epoch loop
         for step, (x, y) in enumerate(train_loader):
             # The dataloader handles padding, but we might need to truncate if a single example is too long
             # This now uses the NEW, larger block size
-            x = x[:, :model_config.block_size].to("cuda")
-            y = y[:, :model_config.block_size].to("cuda")
+            x = x[:, :ModelConfig.block_size].to("cuda")
+            y = y[:, :ModelConfig.block_size].to("cuda")
 
             # Forward pass
             logits, loss, _ = model(x, targets=y)
