@@ -55,14 +55,27 @@ class LLMconfig:
     n_layer : int
     norm : str | Literal['layer','rms']
 
-    act_recomp : bool  # more of a training param, but the best way to integrate that is to just add it here
+    act_recomp : bool
     CUSTOM_LAYERS : bool
-    layer_configs : list[BlockConfig] | None # dict keys = ['n_embd', 'moe/mlp', up_dim, non_linearity, dropout, n_exp, n_shared, n_act, aux_free, coeff alpha, gamma]
+    layer_configs : list[BlockConfig] | None
 
     model_type:str = "custom_model"
+    _name_or_path: Optional[str] = None # ADD THIS LINE
 
     def get(self, attr):
         return getattr(self, attr, None)
+
+    def __contains__(self, key): # ADD THIS METHOD
+        """Enables the 'in' operator for LLMconfig instances."""
+        if key == "_name_or_path":
+            return True # PEFT checks for this specific key
+        return hasattr(self, key)
+    
+    def __getitem__(self, key): # ADD THIS METHOD
+        """Enables dictionary-style access, e.g., config["_name_or_path"]."""
+        if hasattr(self, key):
+            return getattr(self, key)
+        raise KeyError(f"'{key}' not found in LLMconfig for dictionary-style access.")
 
 @dataclass
 class Trainconfig:
@@ -96,7 +109,6 @@ class FineTuneConfig:
     lora_alpha : int
 
 def load_pretrained_model(checkpoint_path, device):
-    # print(f"Loading checkpoint from: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     ModelConfig:LLMconfig = checkpoint['model_config']
@@ -111,13 +123,12 @@ def load_pretrained_model(checkpoint_path, device):
         act_recomp=ModelConfig.act_recomp,
         CUSTOM_LAYERS=ModelConfig.CUSTOM_LAYERS,
         layer_configs=ModelConfig.layer_configs,
-        model_type="custom"
+        model_type="custom",
+        _name_or_path="custom" # ADD THIS LINE
     )
     model = LLM(new_config).to(device)
     model.load_state_dict(checkpoint['model_state'])
     return model, new_config
-
-# --- Tokenizer and Special Tokens ---
 
 def get_tokenizer(new_special_tokens):
     # Use the gpt2 tokenizer as requested
@@ -147,7 +158,7 @@ def prepare_sample(conversation):
     input_ids, labels = [], []
     for msg in conversation["messages"]:
         role_token = USER_TOKEN_ID if msg["role"] == "user" else ASSISTANT_TOKEN_ID
-        content_tokens = tokenizer.encode(msg["text"])
+        content_tokens = tokenizer.encode(str(msg["text"]))
         
         input_ids.extend([role_token] + content_tokens + [EOT_TOKEN_ID])
         
@@ -175,24 +186,59 @@ def collate_fn(batch):
     labels_padded = pad_sequence(labels, batch_first=True, padding_value=-1)
     return inputs_padded, labels_padded
 
+class PeftLLMWrapper(torch.nn.Module):
+    def __init__(self, original_llm_instance:LLM):
+        super().__init__()
+        self.base_model = original_llm_instance
+        self.config = self.base_model.config # PEFT might access .config
+
+        # Optionally, adapt other methods if you plan to use PEFT's generation utilities
+        # For now, we only focus on the forward pass error.
+        # If you want to use model.generate() from PEFT, you'll need to wrap/adapt that too.
+
+    # This forward method will be called by PeftModel
+    def forward(self, input_ids: torch.Tensor, labels: Optional[torch.Tensor] = None, attention_mask: Optional[torch.Tensor] = None, **kwargs):
+        # Translate PEFT's input_ids to your LLM's idx
+        # Translate PEFT's labels to your LLM's targets
+        # Ignore attention_mask as your original LLM doesn't use it in forward
+        
+        # Pass other kwargs (like kv_caches) directly
+        kv_caches = kwargs.get("kv_caches")
+
+        # Call the original LLM's forward method
+        return self.base_model.forward(idx=input_ids, targets=labels, kv_caches=kv_caches)
+
+    # If you intend to use PeftModel's generation utilities, you'd also need
+    # to adapt prepare_inputs_for_generation and potentially generate.
+    # For instance, the original LLM.prepare_inputs_for_generation expects 'idx' not 'input_ids'.
+    # For now, let's assume you're only focused on the training loop's forward call.
+    def prepare_inputs_for_generation(self, input_ids: torch.Tensor, **kwargs):
+        # PEFT will call this with 'input_ids', but your LLM expects 'idx'
+        # Also, filter out 'attention_mask' if LLM.generate doesn't use it.
+        kwargs.pop("attention_mask", None) # Ensure attention_mask is not passed to original LLM
+        return self.base_model.prepare_inputs_for_generation(idx=input_ids, **kwargs)
+
+    def generate(self, input_ids: torch.Tensor, **kwargs):
+        # PEFT might call this with 'input_ids'. Your LLM expects 'idx'.
+        return self.base_model.generate(idx=input_ids, **kwargs)
 
 if __name__ == '__main__':
     config = FineTuneConfig(
         base_model= "demo_model_best.pt",
         data_path="data/open_assistant/data.jsonl",
         batch_size=2,
-        max_iters=2000,
-        learning_rate=5e-4,
+        max_iters=2500,
+        learning_rate=9e-4,
         lora_r=16,
         lora_alpha=32)
     
     model, ModelConfig = load_pretrained_model(config.base_model, "cuda")
-    
+    model = PeftLLMWrapper(model)
     # Apply LoRA
     print("Applying LoRA...")
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM, r=config.lora_r, lora_alpha=config.lora_alpha,
-        target_modules=["c_attn", "c_proj", "W_uq", "W_o", "lm_head"], # Adjust based on your model's layer names
+        target_modules=["W_dq", "W_uq", "W_dkv", "W_uk", "W_uv", "lm_head", "c_proj", "c_fc"], # Adjust based on your model's layer names
         lora_dropout=0.05, bias="none")
     
     model = get_peft_model(model, lora_config)
@@ -216,19 +262,19 @@ if __name__ == '__main__':
             y = y[:, :ModelConfig.block_size].to("cuda")
 
             # Forward pass
-            logits, loss, _ = model(x, targets=y)
+            logits, loss, _ = model(input_ids=x, labels=y)
             
             # Backward pass and optimization
             loss.backward()
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             
-            if iter_num % 10 == 0:
-                print(f"Iter {iter_num}: Loss = {loss.item():.4f}")
+            print(f"Iter {iter_num}: Loss = {loss.item():.4f}")
             
             iter_num += 1
             if iter_num >= config.max_iters:
                 break
+            if iter_num%100==0: model.save_pretrained("lora_adapters_extended")
         if iter_num >= config.max_iters:
             break
             
