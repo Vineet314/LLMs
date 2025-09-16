@@ -197,8 +197,8 @@ class NaiveMHLA(nn.Module):
         # self.ln  = LayerNorm(config, config.kv_latent_dim)
         self.dropout = nn.Dropout(config.dropout)
 
-        self.register_buffer('_k_absorbed_inference', None, persistent=False)
-        self.register_buffer('_v_absorbed_inference', None, persistent=False)
+        self.register_buffer('_k_absorbed_inference', None, persistent=True)
+        self.register_buffer('_v_absorbed_inference', None, persistent=True)
 
     def _precompute_absorbed_matrices(self):
         """Precomputes k_absorbed and v_absorbed for efficient inference."""
@@ -287,8 +287,8 @@ class FullMHLA(nn.Module):
         self.W_o = nn.Linear(config.n_embd, config.n_embd ,False)
 
         # Absroption during inference
-        self.register_buffer('_k_absorbed_inference', None, persistent=False)
-        self.register_buffer('_v_absorbed_inference', None, persistent=False)
+        self.register_buffer('_k_absorbed_inference', None, persistent=True)
+        self.register_buffer('_v_absorbed_inference', None, persistent=True)
 
     def _precompute_absorbed_matrices(self):
         """Precomputes k_absorbed and v_absorbed for efficient inference."""
