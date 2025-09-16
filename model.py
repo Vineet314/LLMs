@@ -675,6 +675,20 @@ class LLM(nn.Module):
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate)
         return optimizer
 
+    def prepare_inputs_for_generation(self, input_ids, **kwargs):
+        """
+        Prepares inputs for generation. This is a standard method expected by
+        Hugging Face's generation utilities.
+        """
+        # The model_inputs dictionary will be passed to the forward method.
+        # It needs to contain all the arguments that the forward method accepts.
+        model_inputs = {"idx": input_ids}
+
+        # The `kwargs` dictionary might contain other useful parameters like `past_key_values`.
+        # In your case, you are using `kv_caches`.
+        model_inputs.update(kwargs)
+        return model_inputs
+
     def forward(self, idx: torch.Tensor, targets:torch.Tensor|None=None, kv_caches:list[torch.Tensor]|None=None):
         B, T = idx.size()
         start_pos = 0
