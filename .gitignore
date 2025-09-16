@@ -34,3 +34,4 @@ wandb/
 # SFT datasets
 data/open_assistant/*.jsonl
 data/open_assistant/*.xlsx
+lora*/
