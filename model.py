@@ -750,7 +750,7 @@ class LLM(nn.Module):
         return logits, loss, updated_kv_caches
     
     @torch.no_grad()
-    def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, topk: int | None = None):
+    def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, topk: int | None = None, EOT:int=None):
         self.eval()
         kv_caches = [None] * self.config.n_layer
 
@@ -801,6 +801,7 @@ class LLM(nn.Module):
                 probs = F.softmax(logits, dim=-1) # generate a probability distribution
                 idx_next = torch.multinomial(probs, num_samples=1) # sample from probabilty distribution
             
+            if EOT is not None and (idx_next.item() == EOT): break
             idx = torch.cat((idx, idx_next), dim=1)
 
         self.train()
