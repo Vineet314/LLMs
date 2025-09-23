@@ -148,8 +148,8 @@ class GQA(nn.Module):
         q_proj_size = C # n_embd
         kv_proj_size = nkvh * hs
         q, k, v = self.c_attn(x).split([q_proj_size, kv_proj_size, kv_proj_size], dim=2)
-        q:torch.Tensor = q.view(B, T, nh, hs) # (B, T, nh, hs)
-        k:torch.Tensor = k.view(B, T, nkvh, hs) # (B, T, n_kvh, hs)
+        q:torch.Tensor = q.view(B, T, nh, hs)                   # (B, T, nh, hs)
+        k:torch.Tensor = k.view(B, T, nkvh, hs)                 # (B, T, n_kvh, hs)
         v:torch.Tensor = v.view(B, T, nkvh, hs).transpose(1, 2) # (B, n_kvh, T, hs)
 
         if self.config.pos_emb == 'rope':
