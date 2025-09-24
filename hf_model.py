@@ -5,6 +5,8 @@ This will involve a ton of changes, including:
 2. Changing the config class to PreTrainedConfig
 3. Work out the generation method
 4. Work out the tokenisation method
+
+Update: Not sure what to do about `q_norm` and `k_norm`, Rest of the model structure is almost done.
 '''
 import warnings; warnings.filterwarnings('ignore')
 import math
@@ -17,7 +19,7 @@ from typing import Literal, Optional
 from dataclasses import dataclass 
 
 @dataclass
-class BlockConfig:
+class DecoderLayerConfig:
     # global
     n_embd: int
     pos_emb: str | Literal['learn', 'sin', 'rope']
@@ -60,7 +62,7 @@ class LLMconfig:
 
     act_recomp : bool  # more of a training param, but the best way to integrate that is to just add it here
     CUSTOM_LAYERS : bool
-    layer_configs : list[BlockConfig] | None # dict keys = ['n_embd', 'moe/mlp', up_dim, non_linearity, dropout, n_exp, n_shared, n_act, aux_free, coeff alpha, gamma]
+    layer_configs : list[DecoderLayerConfig] | None # dict keys = ['n_embd', 'moe/mlp', up_dim, non_linearity, dropout, n_exp, n_shared, n_act, aux_free, coeff alpha, gamma]
 
     @staticmethod
     def apply_rotary_emb(x:torch.Tensor, freqs_cis:torch.Tensor)->torch.Tensor:
@@ -100,7 +102,7 @@ class LayerNorm(nn.Module):
 class GQA(nn.Module):
     """ Grouped-Query Attention with or without RoPE """
 
-    def __init__(self, config:BlockConfig):
+    def __init__(self, config:DecoderLayerConfig):
         super().__init__()
         if config.attn == 'mha' : config.n_kv_heads = config.n_head
         elif config.attn == 'mqa' : config.n_kv_heads = 1
@@ -111,11 +113,10 @@ class GQA(nn.Module):
         self.head_size = config.n_embd // config.n_head
 
         # k,q,v in a btach
-        self.c_attn = nn.Linear(config.n_embd, config.n_embd + 2 * config.n_kv_heads * self.head_size)
+        self.qkv_proj = nn.Linear(config.n_embd, config.n_embd + 2 * config.n_kv_heads * self.head_size)
         # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.o_proj = nn.Linear(config.n_embd, config.n_embd)
         # regularization
-        self.attn_dropout  = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
@@ -124,7 +125,7 @@ class GQA(nn.Module):
 
         q_proj_size = C # n_embd
         kv_proj_size = nkvh * hs
-        q, k, v = self.c_attn(x).split([q_proj_size, kv_proj_size, kv_proj_size], dim=2)
+        q, k, v = self.qkv_proj(x).split([q_proj_size, kv_proj_size, kv_proj_size], dim=2)
         q:torch.Tensor = q.view(B, T, nh, hs)                   # (B, T, nh, hs)
         k:torch.Tensor = k.view(B, T, nkvh, hs)                 # (B, T, n_kvh, hs)
         v:torch.Tensor = v.view(B, T, nkvh, hs).transpose(1, 2) # (B, n_kvh, T, hs)
@@ -152,13 +153,13 @@ class GQA(nn.Module):
         y = y.transpose(1,2).contiguous().view(B,T,C)
 
         # output projection
-        y = self.resid_dropout(self.c_proj(y))
+        y = self.resid_dropout(self.o_proj(y))
 
         return y, updated_kv_cache
 
-class NaiveMHLA(nn.Module):
-    """ A fully parallel implementation of the MHLA algorithm without the RoPE. No for loops."""
-    def __init__(self, config:BlockConfig):
+class NaiveMLA(nn.Module):
+    """ A fully parallel implementation of the MLA algorithm without the RoPE. No for loops."""
+    def __init__(self, config:DecoderLayerConfig):
         super().__init__()
         assert config.n_embd % config.n_head == 0, "num of heads must be a divisor of n_embd"
         self.head_size = config.n_embd // config.n_head
@@ -172,7 +173,7 @@ class NaiveMHLA(nn.Module):
         self.W_o   = nn.Linear(config.n_embd,        config.n_embd,        bias=False)
         
         # self.ln  = LayerNorm(config, config.kv_latent_dim)
-        self.dropout = nn.Dropout(config.dropout)
+        self.dropout_layer = nn.Dropout(config.dropout)
 
         self.register_buffer('_k_absorbed_inference', None, persistent=True)
         self.register_buffer('_v_absorbed_inference', None, persistent=True)
@@ -227,27 +228,27 @@ class NaiveMHLA(nn.Module):
         mask = torch.triu(torch.ones(T, T_full, device=x.device, dtype=torch.bool), diagonal=T_full - T + 1)
         attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
         
-        attn = self.dropout(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
+        attn = self.dropout_layer(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
 
         # final output : attn @ C_kv @ v_abs 
         # (B, nh, T, T) * (B, 1, T, n_kvl) * (1, nh, n_kvl, hs) = (B, nh, T, hs)
         y:torch.Tensor = attn @ c_kv.unsqueeze(1) @ v_eff #(B, nh, T, hs)
-        y = self.dropout(y.transpose(1,2).contiguous().view(B,T,C))
+        y = self.dropout_layer(y.transpose(1,2).contiguous().view(B,T,C))
 
         return y, updated_kv_cache
 
-class FullMHLA(nn.Module):
+class MLA(nn.Module):
     """
     A fully parallel implementation of Multi-Head Latent Attention (MLA)
     with Decoupled Rotary Position Embeddings (RoPE), as described in DeepSeek-V2.
     """
      
-    def __init__(self, config:BlockConfig):
+    def __init__(self, config:DecoderLayerConfig):
         super().__init__()
         assert config.n_embd % config.n_head == 0, "num of heads must be a divisor of n_embd"
         self.config = config
         self.W_dq  = nn.Linear(config.n_embd, config.q_latent_dim , False)
-        self.dropout = nn.Dropout(config.dropout)
+        self.dropout_layer = nn.Dropout(config.dropout)
         
         # (NoPE)
         self.head_size = config.n_embd // config.n_head
@@ -335,12 +336,12 @@ class FullMHLA(nn.Module):
         mask = torch.triu(torch.ones(T, T_full, device=x.device, dtype=torch.bool), diagonal=T_full - T + 1)
         attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
 
-        attn:torch.Tensor = self.dropout(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
+        attn:torch.Tensor = self.dropout_layer(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
 
         # final output : attn @ C_kv @ v_abs 
         # (B, nh, T, T) * (B, 1, T, n_kvl) * (1, nh, n_kvl, hs) = (B, nh, T, hs)
         y:torch.Tensor = attn @ c_kv.unsqueeze(1) @ v_eff #(B, nh, T, hs)
-        y = self.dropout(y.transpose(1,2).contiguous().view(B,T,C))
+        y = self.dropout_layer(y.transpose(1,2).contiguous().view(B,T,C))
 
         updated_kv_cache = {'c_kv': c_kv, 'k_r': k_r}
 
@@ -349,7 +350,7 @@ class FullMHLA(nn.Module):
 class Attention(nn.Module):
     """ Routes the attention mechanism according to the config"""
 
-    def __init__(self, config:BlockConfig):
+    def __init__(self, config:DecoderLayerConfig):
         super().__init__()
         self.config = config
         if config.attn in ('mha','mqa','gqa'):
@@ -357,23 +358,25 @@ class Attention(nn.Module):
         
         elif config.attn == 'mla':
             if config.pos_emb != 'rope':
-                self.attn = NaiveMHLA(config)
+                self.attn = NaiveMLA(config)
             else:
-                self.attn = FullMHLA(config)
+                self.attn = MLA(config)
                 
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
         return self.attn(x, freqs_cis, kv_cache, VAL_RUN)
 
 class MLP(nn.Module):
     """ A simple feed-forward network block. """
-    def __init__(self, config: BlockConfig):
+    def __init__(self, config:DecoderLayerConfig):
         super().__init__()
         self.non_linearity = config.non_linearity.lower()
         
         if self.non_linearity == 'swiglu':
             # One projection, then split into two halves
-            self.c_fc = nn.Linear(config.n_embd, 2 * config.up_dim, bias=False)
-            self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+            self.up_proj   = nn.Linear(config.n_embd, config.up_dim, bias=False)
+            self.gate_proj = nn.Linear(config.n_embd, config.up_dim, bias=False)
+            self.down_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+            self.act_fn = nn.SiLU()
         else:
             non_linearity_map = {
                 'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
@@ -381,27 +384,28 @@ class MLP(nn.Module):
                 'glu' : nn.GLU(), 'sigmoid': nn.Sigmoid(),
                 'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh()
             }
-            self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
-            self.non_linearity_func = non_linearity_map.get(self.non_linearity, nn.GELU())
-            self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+            self.up_proj = nn.Linear(config.n_embd, config.up_dim, bias=False)
+            self.act_fn  = non_linearity_map.get(self.non_linearity, nn.GELU())
+            self.down_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
 
-        self.dropout = nn.Dropout(config.dropout)
+        self.dropout_layer = nn.Dropout(config.dropout)
 
     def forward(self, x):
         if self.non_linearity == 'swiglu':
-            x1, x2 = self.c_fc(x).chunk(2, dim=-1)
-            x = F.silu(x1) * x2
+            x1 = self.up_proj(x)
+            x2 = self.gate_proj(x)
+            x  = F.silu(x1) * x2
         else:
-            x = self.c_fc(x)
-            x = self.non_linearity_func(x)
+            x = self.up_proj(x)
+            x = self.act_fn(x)
         
-        x = self.c_proj(x)
-        x = self.dropout(x)
+        x = self.down_proj(x)
+        x = self.dropout_layer(x)
         return x
 
 class Expert(nn.Module):
     """ A single feed-forward network expert. """
-    def __init__(self, config:BlockConfig):
+    def __init__(self, config:DecoderLayerConfig):
         super().__init__()
         self.expert = MLP(config)
         
@@ -415,7 +419,7 @@ class MoE(nn.Module):
     Ref: https://arxiv.org/pdf/2412.19437
     '''
 
-    def __init__(self, config: BlockConfig):
+    def __init__(self, config: DecoderLayerConfig):
         super().__init__()
         self.config = config
         
@@ -507,45 +511,39 @@ class MoE(nn.Module):
         y = (shared_output + routed_output).view(B, T, C)
         return y, aux_loss
 
-class Block(nn.Module):
+class DecoderLayer(nn.Module):
     """ A single Transformer block combining attention and MLP. """
-    def __init__(self, config:BlockConfig, global_config:LLMconfig):
+    def __init__(self, config:DecoderLayerConfig, global_config:LLMconfig):
         super().__init__()
         self.is_moe = config.moe
-        self.attn = Attention(config)
-        self.ln1  = LayerNorm(global_config, config.n_embd)
-        self.ln2  = LayerNorm(global_config, config.n_embd)
+        self.self_attn = Attention(config)
         if config.moe:
             self.moe = MoE(config)
         else:
             self.mlp = MLP(config)
+        self.input_layernorm  = LayerNorm(global_config, config.n_embd)
+        self.post_attention_layernorm  = LayerNorm(global_config, config.n_embd)
 
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
         # Layer Norm + Attention
-        attn_output, updated_kv_cache = self.attn.forward(self.ln1(x), freqs_cis, kv_cache, VAL_RUN)
+        attn_output, updated_kv_cache = self.self_attn.forward(self.input_layernorm(x), freqs_cis, kv_cache, VAL_RUN)
         x = x + attn_output
 
         if self.is_moe: 
-            moe_output, aux_loss = self.moe(self.ln2(x))
+            moe_output, aux_loss = self.moe(self.post_attention_layernorm(x))
             x = x + moe_output
         else:
             aux_loss = 0.0
-            x = x + self.mlp(self.ln2(x))
+            x = x + self.mlp(self.post_attention_layernorm(x))
 
         return x, updated_kv_cache, aux_loss
-
-class _transformer_container(nn.Module):
-    '''For type checking in LLM class'''
-    drop:nn.Dropout
-    h:list[Block]
-    ln_f:LayerNorm 
 
 class LLM(nn.Module):
     """ A simple Large language model """
     def __init__(self, config:LLMconfig):
         super().__init__()
         self.config = config
-        self.tkn_emb = nn.Embedding(config.vocab_size, config.n_embd)
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.n_embd)
         if config.pos_emb == 'learn':
             self.pos_emb = nn.Embedding(config.block_size, config.n_embd)
         elif config.pos_emb == 'sin':
@@ -560,14 +558,12 @@ class LLM(nn.Module):
             for i,fci in enumerate(fcl): self.register_buffer(f"freqs_cis_{i}", fci)
             del fcl
             # self.register_buffer("freqs_cis_layers", self._precompute_freqs_cis_layers(), persistent=False)
-    
-        self.transformer:_transformer_container = nn.ModuleDict(dict(
-            drop = nn.Dropout(config.dropout),
-            h    = nn.ModuleList([Block(block_config, config) for block_config in config.layer_configs]),
-            ln_f = LayerNorm(config, config.n_embd)))
+        self.layers = nn.ModuleList([DecoderLayer(block_config, config) for block_config in config.layer_configs])
+        self.dropout_layer = nn.Dropout(config.dropout)
+        self.norm = LayerNorm(config, config.n_embd)
         
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.tkn_emb.weight = self.lm_head.weight # weight tying
+        self.embed_tokens.weight = self.lm_head.weight # weight tying
         self.apply(self._init_weights)
 
         self.VAL_RUN=False
@@ -606,7 +602,7 @@ class LLM(nn.Module):
         
         active_params = 0
 
-        active_params += self.tkn_emb.weight.numel()      # embeddings
+        active_params += self.embed_tokens.weight.numel()      # embeddings
         if self.config.pos_emb == 'learn': active_params += self.pos_emb.weight.numel()
         if self.config.norm == 'layer': active_params += self.transformer.ln_f.bias.numel()
         active_params += self.transformer.ln_f.weight.numel() 
@@ -680,7 +676,7 @@ class LLM(nn.Module):
                 else: # Naive MLA (tensor cache)
                     start_pos = kv_caches[0].shape[1]
 
-        tkn_emb = self.tkn_emb(idx)  # Shape: (B, T, n_embd)
+        tkn_emb = self.embed_tokens(idx)  # Shape: (B, T, n_embd)
         
         x = tkn_emb # Default value for x
         freqs_cis_layers = [None for _ in range(self.config.n_layer)]
@@ -695,14 +691,14 @@ class LLM(nn.Module):
             pos = torch.arange(start_pos, start_pos + T, dtype=torch.long, device=idx.device)
             x = tkn_emb + self.pos_emb[pos]
 
-        x = self.transformer.drop(x)
+        x = self.dropout_layer(x)
 
         if kv_caches is None:
             kv_caches = [None] * self.config.n_layer
         
         updated_kv_caches = []
         total_aux_loss = 0.0
-        for i, block in enumerate(self.transformer.h):
+        for i, block in enumerate(self.layers):
             # The block now returns an auxiliary loss from the MoE layer
             if not self.config.act_recomp: 
                 x, updated_kv_cache, aux_loss = block(x, freqs_cis_layers[i], kv_caches[i], self.VAL_RUN)
@@ -712,7 +708,7 @@ class LLM(nn.Module):
             updated_kv_caches.append(updated_kv_cache)
             total_aux_loss += aux_loss
 
-        x = self.transformer.ln_f(x)
+        x = self.norm(x)
 
         if targets is not None:
             logits:torch.Tensor = self.lm_head(x)
