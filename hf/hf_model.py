@@ -1,4 +1,5 @@
 '''
+This model will have only RoPE
 Trying make the model more like those on huggingface's `transformers` library.
 This will involve a ton of changes, including:
 1. Changing the model base class to PreTrainedModel
@@ -22,7 +23,6 @@ from dataclasses import dataclass
 class DecoderLayerConfig:
     # global
     n_embd: int
-    pos_emb: str | Literal['learn', 'sin', 'rope']
     dropout: float
     # attn
     attn: str | Literal['mha', 'mqa', 'gqa', 'mla']
@@ -53,7 +53,6 @@ class LLMconfig:
     vocab_size : int
     block_size : int
     n_embd : int
-    pos_emb : str | Literal['learn','sin','rope']
 
     # model params
     dropout : float
@@ -65,23 +64,24 @@ class LLMconfig:
     layer_configs : list[DecoderLayerConfig] | None # dict keys = ['n_embd', 'moe/mlp', up_dim, non_linearity, dropout, n_exp, n_shared, n_act, aux_free, coeff alpha, gamma]
 
     @staticmethod
-    def apply_rotary_emb(x:torch.Tensor, freqs_cis:torch.Tensor)->torch.Tensor:
+    def apply_rotary_emb(x:torch.Tensor, freqs:torch.Tensor)->torch.Tensor:
         ''' Applies RoPE to either the query or the key whose embeddings are to be rotated two at a time.'''
+        cos, sin = freqs.cos(), freqs.sin()
+        cos.to(x.dtype), sin.to(x.dtype)
 
         # H below is either the number of total query heads(nh)
         # hs is the embedding dimension for the query/key, given by n_embd//nh
         B,T,H,_ = x.size()
         x_ = x.float().reshape(B, T, H, -1, 2)          # (B, T, H, hs)       -> (B, T, H, hs//2, 2)    -> creates the two pairs in the embd dim
         x_re, x_im = x_.unbind(-1)                      # (B, T, H, hs//2, 2) -> (B, T, H, hs//2)       -> splits those two pairs
-        freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(2) # (T, hs//2)          -> (1, T, 1, hs//2)       -> this has dtype complex64, so last dim has two parts, real and imaginary
-        # freqs_cis has two parts : real and imaginary (cosθ, sinθ)
+        cos, sin = cos[None, :, None, :], sin[None, :, None, :] # (T, hs//2)          -> (1, T, 1, hs//2)       -> this has dtype complex64, so last dim has two parts, real and imaginary
         # import code ; code.interact(local=locals())
         # Perform the rotation (vector * rotation matrix)
-        x_re_out = x_re*freqs_cis.real - x_im*freqs_cis.imag    # (B, T, H, hs//2) * (1, T, 1, hs//2) - (B, T, H, hs//2) * (1, T, 1, hs//2) -> (B, T, H, hs//2)
-        x_im_out = x_re*freqs_cis.imag + x_im*freqs_cis.real    # (B, T, H, hs//2) * (1, T, 1, hs//2) + (B, T, H, hs//2) * (1, T, 1, hs//2) -> (B, T, H, hs//2)
+        x_re_out = x_re*cos - x_im*sin   # (B, T, H, hs//2) * (1, T, 1, hs//2) - (B, T, H, hs//2) * (1, T, 1, hs//2) -> (B, T, H, hs//2)
+        x_im_out = x_re*sin + x_im*cos    # (B, T, H, hs//2) * (1, T, 1, hs//2) + (B, T, H, hs//2) * (1, T, 1, hs//2) -> (B, T, H, hs//2)
         
         # Stack the real and imaginary parts back together
-        x_out = torch.stack([x_re_out, x_im_out], dim=-1).flatten(3) # (B, T, H, hs//2), (B, T, H, hs//2) -> (B, T, H, hs)
+        x_out = torch.cat([x_re_out, x_im_out], 3) # (B, T, H, hs//2), (B, T, H, hs//2) -> (B, T, H, hs)
 
         return x_out.type_as(x)
 
@@ -119,7 +119,7 @@ class GQA(nn.Module):
         # regularization
         self.resid_dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
+    def forward(self, x:torch.Tensor, freqs:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
         B, T, C = x.size()
         nh, nkvh, hs = self.config.n_head , self.config.n_kv_heads, self.head_size
 
@@ -130,11 +130,8 @@ class GQA(nn.Module):
         k:torch.Tensor = k.view(B, T, nkvh, hs)                 # (B, T, n_kvh, hs)
         v:torch.Tensor = v.view(B, T, nkvh, hs).transpose(1, 2) # (B, n_kvh, T, hs)
 
-        if self.config.pos_emb == 'rope':
-        # Apply RoPE
-            q = LLMconfig.apply_rotary_emb(q, freqs_cis)
-            k = LLMconfig.apply_rotary_emb(k, freqs_cis)
-
+        q,k = LLMconfig.apply_rotary_emb(q, freqs), LLMconfig.apply_rotary_emb(k, freqs)
+        q,k = F.rms_norm(q, (q.size(-1),)), F.rms_norm(k, (k.size(-1),)) # q,k norm
         q,k = q.transpose(1, 2), k.transpose(1, 2) # (B, nh, T, hs) # (B, n_kvh, T, hs)
 
         if kv_cache is not None:
@@ -154,86 +151,6 @@ class GQA(nn.Module):
 
         # output projection
         y = self.resid_dropout(self.o_proj(y))
-
-        return y, updated_kv_cache
-
-class NaiveMLA(nn.Module):
-    """ A fully parallel implementation of the MLA algorithm without the RoPE. No for loops."""
-    def __init__(self, config:DecoderLayerConfig):
-        super().__init__()
-        assert config.n_embd % config.n_head == 0, "num of heads must be a divisor of n_embd"
-        self.head_size = config.n_embd // config.n_head
-        self.config = config
-
-        self.W_dq  = nn.Linear(config.n_embd,        config.q_latent_dim,  bias=False)
-        self.W_uq  = nn.Linear(config.q_latent_dim,  config.n_embd,        bias=False)
-        self.W_dkv = nn.Linear(config.n_embd,        config.kv_latent_dim, bias=False)
-        self.W_uk  = nn.Linear(config.kv_latent_dim, config.n_embd,        bias=False)
-        self.W_uv  = nn.Linear(config.kv_latent_dim, config.n_embd,        bias=False)
-        self.W_o   = nn.Linear(config.n_embd,        config.n_embd,        bias=False)
-        
-        # self.ln  = LayerNorm(config, config.kv_latent_dim)
-        self.dropout_layer = nn.Dropout(config.dropout)
-
-        self.register_buffer('_k_absorbed_inference', None, persistent=True)
-        self.register_buffer('_v_absorbed_inference', None, persistent=True)
-
-    def _precompute_absorbed_matrices(self):
-        """Precomputes k_absorbed and v_absorbed for efficient inference."""
-        # Just to be safe
-        if (self._k_absorbed_inference is not None) and (self._v_absorbed_inference is not None):
-            return 
-        
-        nh , n_kvl, hs = self.config.n_head, self.config.kv_latent_dim, self.head_size
-        with torch.no_grad():
-            self._k_absorbed_inference = (self.W_dq.weight.T @ self.W_uq.weight.T  @ self.W_uk.weight).view(nh, hs, n_kvl).unsqueeze(0)
-            self._v_absorbed_inference = (self.W_uv.weight.T @ self.W_o.weight.T).view(n_kvl, nh, hs).transpose(0,1).unsqueeze(0)    
-
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False) -> tuple[torch.Tensor, torch.Tensor]:
-
-        B, T, C = x.size()
-        nh, n_kvl, hs = self.config.n_head, self.config.kv_latent_dim, self.config.n_embd//self.config.n_head
-
-        # k_eff and v_eff based on training or inference
-        if self.training or VAL_RUN: # HIDDEN IN THE DEPTHS : THIS BUG TOOK ~16 HRS TO DEBUG
-            k_eff = (self.W_dq.weight.T @ self.W_uq.weight.T  @ self.W_uk.weight).view(nh, hs, n_kvl).unsqueeze(0)
-            v_eff = (self.W_uv.weight.T @ self.W_o.weight.T).view(n_kvl, nh, hs).transpose(0,1).unsqueeze(0)
-        else:
-            if (self._k_absorbed_inference is None) or (self._v_absorbed_inference is None):
-                self._precompute_absorbed_matrices()
-            k_eff = self._k_absorbed_inference
-            v_eff = self._v_absorbed_inference
-        
-        new_c_kv = self.W_dkv(x) # down projection : (B,T,C) -> (B,T,n_kvl)
-
-        if kv_cache is None:
-            c_kv = new_c_kv # (B,T,n_kvl) ; initiate cache
-        else:
-            c_kv = torch.cat([kv_cache, new_c_kv], dim=1) # append cache
-        
-        updated_kv_cache = c_kv
-
-        T_full = c_kv.size(1) # Current total sequence length (including cache)
-
-        q:torch.Tensor = self.W_uq(self.W_dq(x)) # query projection : (B,T,C) -> (B,T,n_ql) -> (B,T,C)
-        q = q.view(B, T, nh, hs).transpose(1, 2) # (B,T,C) -> (B,T,nh,hs) -> (B, nh, T, hs)
-
-        attn:torch.Tensor = (q @ k_eff @ c_kv.transpose(1,2).unsqueeze(1)) / math.sqrt(hs)
-
-        # query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
-        # key_indices   = torch.arange(T_full, device=x.device).unsqueeze(0)
-        # mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
-        # attn = attn.masked_fill(mask == 0, float('-inf'))
-        
-        mask = torch.triu(torch.ones(T, T_full, device=x.device, dtype=torch.bool), diagonal=T_full - T + 1)
-        attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
-        
-        attn = self.dropout_layer(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
-
-        # final output : attn @ C_kv @ v_abs 
-        # (B, nh, T, T) * (B, 1, T, n_kvl) * (1, nh, n_kvl, hs) = (B, nh, T, hs)
-        y:torch.Tensor = attn @ c_kv.unsqueeze(1) @ v_eff #(B, nh, T, hs)
-        y = self.dropout_layer(y.transpose(1,2).contiguous().view(B,T,C))
 
         return y, updated_kv_cache
 
@@ -279,7 +196,7 @@ class MLA(nn.Module):
             self._k_absorbed_inference = (self.W_uq.weight.view(1,nlq,nh,hs).transpose(1,2) @ self.W_uk.weight.view(1,nh,hs,nlkv))
             self._v_absorbed_inference = (self.W_uv.weight.T @ self.W_o.weight.T).view(nlkv, nh, hs).transpose(0,1).unsqueeze(0)    
 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
+    def forward(self, x:torch.Tensor, freqs:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
         B,T,C = x.size()
         nh,nlkv,nlq = self.config.n_head, self.config.kv_latent_dim, self.config.q_latent_dim
         hs = C//nh
@@ -313,14 +230,14 @@ class MLA(nn.Module):
  #------------ RoPE--------------
 
         c_kr:torch.Tensor = self.W_kr(x).unsqueeze(2)        # (B,T,1,dhr)
-        k_r = LLMconfig.apply_rotary_emb(c_kr, freqs_cis).transpose(1,2)  # (B,1,T,dhr), to be cached
+        k_r = LLMconfig.apply_rotary_emb(c_kr, freqs).transpose(1,2)  # (B,1,T,dhr), to be cached
 
         # initate KV cache
         if kv_cache is not None:
             k_r = torch.cat([kv_cache['k_r'], k_r], dim=2)
 
         c_qr:torch.Tensor = self.W_qr(c_q).view(B,T,nh,dhr) # (B,T,nh,dhr) # because rope expects (B,T,H,dh)
-        q_r = LLMconfig.apply_rotary_emb(c_qr, freqs_cis).transpose(1,2) # (B,nh,T,dhr)
+        q_r = LLMconfig.apply_rotary_emb(c_qr, freqs).transpose(1,2) # (B,nh,T,dhr)
         
         attn_r = q_r @ k_r.transpose(-1,-2)
 
@@ -346,24 +263,6 @@ class MLA(nn.Module):
         updated_kv_cache = {'c_kv': c_kv, 'k_r': k_r}
 
         return y, updated_kv_cache
-
-class Attention(nn.Module):
-    """ Routes the attention mechanism according to the config"""
-
-    def __init__(self, config:DecoderLayerConfig):
-        super().__init__()
-        self.config = config
-        if config.attn in ('mha','mqa','gqa'):
-            self.attn = GQA(config)
-        
-        elif config.attn == 'mla':
-            if config.pos_emb != 'rope':
-                self.attn = NaiveMLA(config)
-            else:
-                self.attn = MLA(config)
-                
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
-        return self.attn(x, freqs_cis, kv_cache, VAL_RUN)
 
 class MLP(nn.Module):
     """ A simple feed-forward network block. """
@@ -516,7 +415,7 @@ class DecoderLayer(nn.Module):
     def __init__(self, config:DecoderLayerConfig, global_config:LLMconfig):
         super().__init__()
         self.is_moe = config.moe
-        self.self_attn = Attention(config)
+        self.self_attn = GQA(config) if config.attn in ('mha','mqa','gqa') else MLA(config)
         if config.moe:
             self.moe = MoE(config)
         else:
@@ -524,9 +423,9 @@ class DecoderLayer(nn.Module):
         self.input_layernorm  = LayerNorm(global_config, config.n_embd)
         self.post_attention_layernorm  = LayerNorm(global_config, config.n_embd)
 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
+    def forward(self, x:torch.Tensor, freqs:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
         # Layer Norm + Attention
-        attn_output, updated_kv_cache = self.self_attn.forward(self.input_layernorm(x), freqs_cis, kv_cache, VAL_RUN)
+        attn_output, updated_kv_cache = self.self_attn.forward(self.input_layernorm(x), freqs, kv_cache, VAL_RUN)
         x = x + attn_output
 
         if self.is_moe: 
@@ -544,20 +443,12 @@ class LLM(nn.Module):
         super().__init__()
         self.config = config
         self.embed_tokens = nn.Embedding(config.vocab_size, config.n_embd)
-        if config.pos_emb == 'learn':
-            self.pos_emb = nn.Embedding(config.block_size, config.n_embd)
-        elif config.pos_emb == 'sin':
-            pos_emb  = torch.zeros(config.block_size, config.n_embd)
-            position = torch.arange(0, config.block_size, dtype=torch.float).unsqueeze(1)
-            div_term = torch.exp(torch.arange(0, config.n_embd, 2).float() * (-math.log(10000.0) / config.n_embd))
-            pos_emb[:, 0::2] = torch.sin(position * div_term)
-            pos_emb[:, 1::2] = torch.cos(position * div_term)
-            self.register_buffer('pos_emb', pos_emb)
-        elif config.pos_emb == 'rope':
-            fcl = self._precompute_freqs_cis_layers() 
-            for i,fci in enumerate(fcl): self.register_buffer(f"freqs_cis_{i}", fci)
-            del fcl
-            # self.register_buffer("freqs_cis_layers", self._precompute_freqs_cis_layers(), persistent=False)
+
+        fcl = self._precompute_freqs_layers() 
+        for i,fci in enumerate(fcl): self.register_buffer(f"freqs_{i}", fci)
+        del fcl
+        
+        # self.register_buffer("freqs_cis_layers", self._precompute_freqs_cis_layers(), persistent=False)
         self.layers = nn.ModuleList([DecoderLayer(block_config, config) for block_config in config.layer_configs])
         self.dropout_layer = nn.Dropout(config.dropout)
         self.norm = LayerNorm(config, config.n_embd)
@@ -569,9 +460,9 @@ class LLM(nn.Module):
         self.VAL_RUN=False
         if config.act_recomp: print("Using Activation Recomputation")
 
-    def _precompute_freqs_cis_layers(self):
+    def _precompute_freqs_layers(self):
         """Precomputes the rotary frequencies for each layer for RoPE."""
-        freqs_cis_layers = []
+        freqs_layers = []
         for layer_config in self.config.layer_configs:
             d = layer_config.rope_head_dim if layer_config.attn=='mla' else layer_config.n_embd//layer_config.n_head
             assert d % 2 == 0, "head dimension must be even"
@@ -579,13 +470,12 @@ class LLM(nn.Module):
             seq = torch.arange(self.config.block_size)
             freqs = torch.outer(seq, theta)
             # Convert to complex numbers: r * e^(i*theta)
-            freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+            # freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
 
-            if layer_config.pos_emb=='rope': freqs_cis_layers.append(freqs_cis) # Should always happen 
-            else: freqs_cis_layers.append(None) # Should never happen
+            freqs_layers.append(freqs)
 
         # return torch.stack(freqs_cis_layers, dim=0) # register_buffer only accepts a torch.tensor
-        return freqs_cis_layers
+        return freqs_layers
         
     def _init_weights(self, module):
         """Initializes model weights."""
@@ -603,7 +493,6 @@ class LLM(nn.Module):
         active_params = 0
 
         active_params += self.embed_tokens.weight.numel()      # embeddings
-        if self.config.pos_emb == 'learn': active_params += self.pos_emb.weight.numel()
         if self.config.norm == 'layer': active_params += self.transformer.ln_f.bias.numel()
         active_params += self.transformer.ln_f.weight.numel() 
 
@@ -671,25 +560,12 @@ class LLM(nn.Module):
             if first_layer_config.attn in ('mha', 'mqa', 'gqa'):
                 start_pos = kv_caches[0][0].shape[-2]
             elif first_layer_config.attn == 'mla':
-                if first_layer_config.pos_emb == 'rope':
-                    start_pos = kv_caches[0]['c_kv'].shape[1]
-                else: # Naive MLA (tensor cache)
-                    start_pos = kv_caches[0].shape[1]
+                start_pos = kv_caches[0]['c_kv'].shape[1]
 
         tkn_emb = self.embed_tokens(idx)  # Shape: (B, T, n_embd)
         
         x = tkn_emb # Default value for x
-        freqs_cis_layers = [None for _ in range(self.config.n_layer)]
-        if self.config.pos_emb == 'rope':
-            freqs_cis_layers = [getattr(self, f"freqs_cis_{i}")[start_pos : start_pos + T] for i in range(self.config.n_layer)]
-
-        elif self.config.pos_emb == 'learn':
-            pos = torch.arange(start_pos, start_pos + T, dtype=torch.long, device=idx.device)
-            x = tkn_emb + self.pos_emb(pos)
-
-        elif self.config.pos_emb == 'sin':
-            pos = torch.arange(start_pos, start_pos + T, dtype=torch.long, device=idx.device)
-            x = tkn_emb + self.pos_emb[pos]
+        freqs_layers = [getattr(self, f"freqs_{i}")[start_pos : start_pos + T] for i in range(self.config.n_layer)]
 
         x = self.dropout_layer(x)
 
@@ -701,9 +577,9 @@ class LLM(nn.Module):
         for i, block in enumerate(self.layers):
             # The block now returns an auxiliary loss from the MoE layer
             if not self.config.act_recomp: 
-                x, updated_kv_cache, aux_loss = block(x, freqs_cis_layers[i], kv_caches[i], self.VAL_RUN)
+                x, updated_kv_cache, aux_loss = block(x, freqs_layers[i], kv_caches[i], self.VAL_RUN)
             else : 
-                x, updated_kv_cache, aux_loss = checkpoint(block, x, freqs_cis_layers[i], kv_caches[i], self.VAL_RUN)
+                x, updated_kv_cache, aux_loss = checkpoint(block, x, freqs_layers[i], kv_caches[i], self.VAL_RUN)
 
             updated_kv_caches.append(updated_kv_cache)
             total_aux_loss += aux_loss
@@ -740,7 +616,7 @@ class LLM(nn.Module):
                 if first_layer_config.attn in ('mha', 'mqa', 'gqa'):
                     cache_len = kv_caches[0][0].shape[-2]
                 elif first_layer_config.attn == 'mla':
-                     cache_len = kv_caches[0]['c_kv'].shape[1] if self.config.pos_emb == 'rope' else kv_caches[0].shape[1]
+                     cache_len = kv_caches[0]['c_kv'].shape[1]
                 else: cache_len = 0 # should never happen
 
                 # actual handling part
@@ -753,11 +629,8 @@ class LLM(nn.Module):
                             k, v = layer_cache
                             kv_caches[layer_idx] = (k[..., -keep_len:, :], v[..., -keep_len:, :])
                         elif layer_config.attn == 'mla':
-                            if self.config.pos_emb == 'rope':
-                                layer_cache['c_kv'] = layer_cache['c_kv'][:, -keep_len:, :]
-                                layer_cache['k_r']  = layer_cache['k_r'][:, :, -keep_len:, :] # Seq len is dim 2
-                            else: # c_kv
-                                kv_caches[layer_idx] = layer_cache[:, -keep_len:, :]
+                            layer_cache['c_kv'] = layer_cache['c_kv'][:, -keep_len:, :]
+                            layer_cache['k_r']  = layer_cache['k_r'][:, :, -keep_len:, :] # Seq len is dim 2
 
             # The forward pass now returns three items; we only need logits and caches for generation
             logits, _, kv_caches = self(input_for_forward, kv_caches=kv_caches)
