@@ -6,7 +6,7 @@ This will involve a ton of changes, including:
 3. Work out the generation method
 4. Work out the tokenisation method
 
-Update: Not sure what to do about `q_norm` and `k_norm`, Rest of the model structure is almost done.
+Update: added CausalLM class. Need to change attention layers, MLP/MoE layers
 '''
 import warnings; warnings.filterwarnings('ignore')
 import math
@@ -562,8 +562,6 @@ class LLM(nn.Module):
         self.dropout_layer = nn.Dropout(config.dropout)
         self.norm = LayerNorm(config, config.n_embd)
         
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.embed_tokens.weight = self.lm_head.weight # weight tying
         self.apply(self._init_weights)
 
         self.VAL_RUN=False
@@ -595,6 +593,64 @@ class LLM(nn.Module):
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, input_ids: torch.Tensor, targets:torch.Tensor|None=None, kv_caches:list[torch.Tensor]|None=None):
+        B, T = input_ids.size()
+        start_pos = 0
+
+        if kv_caches is not None and kv_caches[0] is not None:
+            first_layer_config = self.config.layer_configs[0]
+            if first_layer_config.attn in ('mha', 'mqa', 'gqa'):
+                start_pos = kv_caches[0][0].shape[-2]
+            elif first_layer_config.attn == 'mla':
+                if first_layer_config.pos_emb == 'rope':
+                    start_pos = kv_caches[0]['c_kv'].shape[1]
+                else: # Naive MLA (tensor cache)
+                    start_pos = kv_caches[0].shape[1]
+
+        tkn_emb = self.embed_tokens(input_ids)  # Shape: (B, T, n_embd)
+        
+        x = tkn_emb # Default value for x
+        freqs_cis_layers = [None for _ in range(self.config.n_layer)]
+        if self.config.pos_emb == 'rope':
+            freqs_cis_layers = [getattr(self, f"freqs_cis_{i}")[start_pos : start_pos + T] for i in range(self.config.n_layer)]
+
+        elif self.config.pos_emb == 'learn':
+            pos = torch.arange(start_pos, start_pos + T, dtype=torch.long, device=input_ids.device)
+            x = tkn_emb + self.pos_emb(pos)
+
+        elif self.config.pos_emb == 'sin':
+            pos = torch.arange(start_pos, start_pos + T, dtype=torch.long, device=input_ids.device)
+            x = tkn_emb + self.pos_emb[pos]
+
+        x = self.dropout_layer(x)
+
+        if kv_caches is None:
+            kv_caches = [None] * self.config.n_layer
+        
+        updated_kv_caches = []
+        total_aux_loss = 0.0
+        for i, block in enumerate(self.layers):
+            # The block now returns an auxiliary loss from the MoE layer
+            if not self.config.act_recomp: 
+                x, updated_kv_cache, aux_loss = block(x, freqs_cis_layers[i], kv_caches[i], self.VAL_RUN)
+            else : 
+                x, updated_kv_cache, aux_loss = checkpoint(block, x, freqs_cis_layers[i], kv_caches[i], self.VAL_RUN)
+
+            updated_kv_caches.append(updated_kv_cache)
+            total_aux_loss += aux_loss
+
+        x = self.norm(x)
+        return x, updated_kv_caches, total_aux_loss
+        
+class CausalLM(nn.Module):
+    def __init__(self, config:LLMconfig):
+        super().__init__()
+        self.config = config
+        self.model = LLM(config)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.model.embed_tokens.weight = self.lm_head.weight # weight tying
+        self.apply(LLM._init_weights)
 
     def get_num_params(self):
         """Returns the total number of parameters and active parameters in the model."""
@@ -648,90 +704,31 @@ class LLM(nn.Module):
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate)
         return optimizer
 
-    def prepare_inputs_for_generation(self, input_ids, **kwargs):
-        """
-        Prepares inputs for generation. This is a standard method expected by
-        Hugging Face's generation utilities.
-        """
-        # The model_inputs dictionary will be passed to the forward method.
-        # It needs to contain all the arguments that the forward method accepts.
-        model_inputs = {"idx": input_ids}
-
-        # The `kwargs` dictionary might contain other useful parameters like `past_key_values`.
-        # In your case, you are using `kv_caches`.
-        model_inputs.update(kwargs)
-        return model_inputs
-
-    def forward(self, idx: torch.Tensor, targets:torch.Tensor|None=None, kv_caches:list[torch.Tensor]|None=None):
-        B, T = idx.size()
-        start_pos = 0
-
-        if kv_caches is not None and kv_caches[0] is not None:
-            first_layer_config = self.config.layer_configs[0]
-            if first_layer_config.attn in ('mha', 'mqa', 'gqa'):
-                start_pos = kv_caches[0][0].shape[-2]
-            elif first_layer_config.attn == 'mla':
-                if first_layer_config.pos_emb == 'rope':
-                    start_pos = kv_caches[0]['c_kv'].shape[1]
-                else: # Naive MLA (tensor cache)
-                    start_pos = kv_caches[0].shape[1]
-
-        tkn_emb = self.embed_tokens(idx)  # Shape: (B, T, n_embd)
-        
-        x = tkn_emb # Default value for x
-        freqs_cis_layers = [None for _ in range(self.config.n_layer)]
-        if self.config.pos_emb == 'rope':
-            freqs_cis_layers = [getattr(self, f"freqs_cis_{i}")[start_pos : start_pos + T] for i in range(self.config.n_layer)]
-
-        elif self.config.pos_emb == 'learn':
-            pos = torch.arange(start_pos, start_pos + T, dtype=torch.long, device=idx.device)
-            x = tkn_emb + self.pos_emb(pos)
-
-        elif self.config.pos_emb == 'sin':
-            pos = torch.arange(start_pos, start_pos + T, dtype=torch.long, device=idx.device)
-            x = tkn_emb + self.pos_emb[pos]
-
-        x = self.dropout_layer(x)
-
-        if kv_caches is None:
-            kv_caches = [None] * self.config.n_layer
-        
-        updated_kv_caches = []
-        total_aux_loss = 0.0
-        for i, block in enumerate(self.layers):
-            # The block now returns an auxiliary loss from the MoE layer
-            if not self.config.act_recomp: 
-                x, updated_kv_cache, aux_loss = block(x, freqs_cis_layers[i], kv_caches[i], self.VAL_RUN)
-            else : 
-                x, updated_kv_cache, aux_loss = checkpoint(block, x, freqs_cis_layers[i], kv_caches[i], self.VAL_RUN)
-
-            updated_kv_caches.append(updated_kv_cache)
-            total_aux_loss += aux_loss
-
-        x = self.norm(x)
+    def forward(self, input_ids:torch.Tensor, targets:torch.Tensor|None=None, kv_caches:list[torch.Tensor]|None=None):
+        model_output, updated_kv_caches, total_aux_loss = self.model.forward(input_ids, targets, kv_caches)
 
         if targets is not None:
-            logits:torch.Tensor = self.lm_head(x)
+            logits:torch.Tensor = self.lm_head(model_output)
             main_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
             # Add the accumulated auxiliary loss to the main loss
             # We divide by the number of layers because loss is accumulated from each MoE block
             loss = main_loss + total_aux_loss / self.config.n_layer
         else:
-            logits = self.lm_head(x[:, [-1], :])
+            logits = self.lm_head(model_output[:, [-1], :])
             loss = None
 
         return logits, loss, updated_kv_caches
-    
+
     @torch.no_grad()
-    def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, topk: int | None = None, EOT:int=None):
+    def generate(self, input_ids: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, topk: int | None = None, EOT:int=None):
         self.eval()
         kv_caches = [None] * self.config.n_layer
 
         for _ in range(max_new_tokens):
             # crop context to block size, rolling context window
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            idx_cond = input_ids if input_ids.size(1) <= self.config.block_size else input_ids[:, -self.config.block_size:]
             # for first token, use full prompt, and only last token for subsequent tokens
-            input_for_forward = idx_cond if kv_caches[0] is None else idx[:, -1:]
+            input_for_forward = idx_cond if kv_caches[0] is None else input_ids[:, -1:]
 
             # handle the rolling KV cache
             if kv_caches[0] is not None:
@@ -775,7 +772,7 @@ class LLM(nn.Module):
                 idx_next = torch.multinomial(probs, num_samples=1) # sample from probabilty distribution
             
             if EOT is not None and (idx_next.item() == EOT): break
-            idx = torch.cat((idx, idx_next), dim=1)
+            input_ids = torch.cat((input_ids, idx_next), dim=1)
 
         self.train()
-        return idx
+        return input_ids
