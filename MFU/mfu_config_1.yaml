@@ -1,0 +1,24 @@
+act_recomp: false
+alpha: null
+attn: mha
+aux_free: null
+block_size: 256 # seq_len
+coeff: null
+dropout: 0.3
+gamma: null
+kv_latent_dim: null
+moe: false
+n_act: null
+n_embd: 128
+n_exp: null
+n_head: 8
+n_kv_heads: null
+n_layer: 5
+n_shared: null
+non_linearity: relu
+norm: layer
+pos_emb: sin
+q_latent_dim: null
+rope_head_dim: null
+up_dim: 512
+vocab_size: 50304

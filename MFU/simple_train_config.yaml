@@ -1,0 +1,18 @@
+act_recomp: false
+batch_size: 2
+ckpt_interval: 250
+compile: true
+dataset: tinystories
+eval: false
+eval_interval: 100
+eval_iters: 100
+file_name: llm_model
+grad_clip: 1.0
+learning_rate: 0.0003
+max_iters: 500
+save_model: false
+total_batch_size: 512 # total_batch_size = batch_size * seq_len * grad_accum_steps
+wandb_log: false
+wandb_project: llms
+wandb_run_name: null
+warmup_steps: 50
