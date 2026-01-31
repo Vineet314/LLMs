@@ -1,0 +1,941 @@
+import os
+import math
+import yaml
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+
+from torch.utils.checkpoint import checkpoint
+from typing import Literal, Optional
+from dataclasses import dataclass, asdict
+from time import perf_counter
+
+torch.cuda.get_device_name()
+
+# model.py
+@dataclass
+class LLMconfig:
+    pos_emb: str | Literal['learn', 'sin', 'rope']
+    # attn
+    attn: str | Literal['mha', 'mqa', 'gqa', 'mla']
+    n_head: int
+    # ffn
+    moe: bool
+    up_dim: int
+    non_linearity: str | Literal['elu', 'lrelu', 'relu', 'gelu', 'swish', 'mish', 'silu','selu', 'celu', 'tanh', 'swiglu', 'sigmoid']
+
+    # token params
+    vocab_size : int
+    block_size : int
+    n_embd : int
+
+    # model params
+    dropout : float
+    n_layer : int
+    norm : str | Literal['layer','rms']
+
+    act_recomp : bool  # more of a training param, but the best way to integrate that is to just add it here
+
+    # Optional fields with default as None
+    # attn
+    n_kv_heads: Optional[int] = None
+    q_latent_dim:  Optional[int] = None
+    kv_latent_dim: Optional[int] = None
+    rope_head_dim: Optional[int] = None
+    # ffn
+    n_exp:    Optional[int] = None
+    n_shared: Optional[int] = None
+    n_act:    Optional[int] = None
+    coeff:    Optional[float] = None
+    aux_free: Optional[bool] = None
+    alpha:    Optional[float] = None
+    gamma:    Optional[float] = None
+
+@dataclass
+class Trainconfig:
+    dataset : str | Literal['shakespeare', 'tinystories', 'fineweb', 'wikitext']
+    total_batch_size : int
+    batch_size : int
+    max_iters : int
+    eval : bool
+    eval_interval : int
+    eval_iters : int
+    learning_rate : float
+    warmup_steps : int
+    grad_clip : int
+    compile : bool #= False if os.name != 'posix' else True
+    save_model : bool
+    ckpt_interval : int
+    file_name : str
+    act_recomp : bool
+    wandb_log : bool
+    wandb_project : str
+    wandb_run_name : str
+
+class DataLoader:
+    def __init__(self, B, T, file_path, device):
+        self.B = B
+        self.T = T
+        self.file_path = file_path
+        self.device = device
+        self.device_type = 'cuda' if 'cuda' in device else 'cpu'
+
+        # Keep the memory-mapped file open persistently
+        self.tokens = np.memmap(self.file_path, dtype=np.uint16, mode='r')
+        self.N = len(self.tokens)
+        if self.B * self.T + 1 > self.N:
+            raise ValueError(f"Batch size {B} and block size {T} are too large for dataset of length {self.N}")
+
+    def next_batch(self):
+        """
+        Returns (x, y) where:
+        - x is (B, T) input tokens
+        - y is (B, T) target tokens (shifted by one)
+        """
+        B, T = self.B, self.T
+
+        # Sample B random starting positions independently
+        start_indices = torch.randint(0, self.N - T - 1, (B,))
+
+        # Gather sequences
+        x_list = []
+        y_list = []
+        for start in start_indices:
+            seq = self.tokens[start : start + T + 1].astype(np.int64)
+            x_list.append(seq[:-1])
+            y_list.append(seq[1:])
+
+        # Stack into tensors
+        x = torch.tensor(np.stack(x_list), dtype=torch.long)
+        y = torch.tensor(np.stack(y_list), dtype=torch.long)
+
+        # Move to device (with pinned memory if CUDA)
+        if self.device_type == 'cuda':
+            x = x.pin_memory().to(self.device, non_blocking=True)
+            y = y.pin_memory().to(self.device, non_blocking=True)
+        else:
+            x = x.to(self.device)
+            y = y.to(self.device)
+        return x, y
+
+class LayerNorm(nn.Module):
+    ''' Implements the given type of layer normalization (either Vanilla Layer Norm or RMS-Layer Norm)'''
+    def __init__(self, config:LLMconfig, dim:int):
+        super().__init__()
+        if config.norm == 'layer': 
+            self.norm = nn.LayerNorm(dim)
+            self.bias  = self.norm.bias
+        elif config.norm == 'rms':
+            self.norm = nn.RMSNorm(dim)
+        self.weight = self.norm.weight
+    
+    def forward(self, x):
+        return self.norm(x)
+    
+class GQA(nn.Module):
+    """ Grouped-Query Attention with or without RoPE """
+
+    def __init__(self, config:LLMconfig):
+        super().__init__()
+        if config.attn == 'mha' : config.n_kv_heads = config.n_head
+        elif config.attn == 'mqa' : config.n_kv_heads = 1
+        else : assert config.n_head % config.n_kv_heads == 0, "n_head must be divisible by n_kv_heads"
+        
+        assert config.n_embd % config.n_head == 0, "n_embd must be divisible by n_head"
+        self.config = config
+        self.head_size = config.n_embd // config.n_head
+
+        # k,q,v in a btach
+        self.c_attn = nn.Linear(config.n_embd, config.n_embd + 2 * config.n_kv_heads * self.head_size)
+        # output projection
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        # regularization
+        self.attn_dropout  = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
+        B, T, C = x.size()
+        nh, nkvh, hs = self.config.n_head , self.config.n_kv_heads, self.head_size
+
+        q_proj_size = C # n_embd
+        kv_proj_size = nkvh * hs
+        q, k, v = self.c_attn(x).split([q_proj_size, kv_proj_size, kv_proj_size], dim=2)
+        q:torch.Tensor = q.view(B, T, nh, hs)                   # (B, T, nh, hs)
+        k:torch.Tensor = k.view(B, T, nkvh, hs)                 # (B, T, n_kvh, hs)
+        v:torch.Tensor = v.view(B, T, nkvh, hs).transpose(1, 2) # (B, n_kvh, T, hs)
+
+        if self.config.pos_emb == 'rope':
+        # Apply RoPE
+            q = apply_rotary_emb(q, freqs_cis)
+            k = apply_rotary_emb(k, freqs_cis)
+
+        q,k = q.transpose(1, 2), k.transpose(1, 2) # (B, nh, T, hs) # (B, n_kvh, T, hs)
+
+        if kv_cache is not None:
+            past_k, past_v = kv_cache
+            k = torch.cat((past_k, k), dim=-2)
+            v = torch.cat((past_v, v), dim=-2)
+
+        updated_kv_cache = (k, v)
+
+        if nkvh != nh:
+            num_repeats = nh // nkvh
+            k = k.repeat_interleave(num_repeats, dim=1)
+            v = v.repeat_interleave(num_repeats, dim=1)
+
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.config.dropout if self.training else 0, is_causal=True)
+        y = y.transpose(1,2).contiguous().view(B,T,C)
+
+        # output projection
+        y = self.resid_dropout(self.c_proj(y))
+
+        return y, updated_kv_cache
+
+class NaiveMHLA(nn.Module):
+    """ A fully parallel implementation of the MHLA algorithm without the RoPE. No for loops."""
+    def __init__(self, config:LLMconfig):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0, "num of heads must be a divisor of n_embd"
+        self.head_size = config.n_embd // config.n_head
+        self.config = config
+
+        self.W_dq  = nn.Linear(config.n_embd,        config.q_latent_dim,  bias=False)
+        self.W_uq  = nn.Linear(config.q_latent_dim,  config.n_embd,        bias=False)
+        self.W_dkv = nn.Linear(config.n_embd,        config.kv_latent_dim, bias=False)
+        self.W_uk  = nn.Linear(config.kv_latent_dim, config.n_embd,        bias=False)
+        self.W_uv  = nn.Linear(config.kv_latent_dim, config.n_embd,        bias=False)
+        self.W_o   = nn.Linear(config.n_embd,        config.n_embd,        bias=False)
+        
+        # self.ln  = LayerNorm(config, config.kv_latent_dim)
+        self.dropout = nn.Dropout(config.dropout)
+
+        self.register_buffer('_k_absorbed_inference', None, persistent=True)
+        self.register_buffer('_v_absorbed_inference', None, persistent=True)
+
+    def _precompute_absorbed_matrices(self):
+        """Precomputes k_absorbed and v_absorbed for efficient inference."""
+        # Just to be safe
+        if (self._k_absorbed_inference is not None) and (self._v_absorbed_inference is not None):
+            return 
+        
+        nh , n_kvl, hs = self.config.n_head, self.config.kv_latent_dim, self.head_size
+        with torch.no_grad():
+            self._k_absorbed_inference = (self.W_dq.weight.T @ self.W_uq.weight.T  @ self.W_uk.weight).view(nh, hs, n_kvl).unsqueeze(0)
+            self._v_absorbed_inference = (self.W_uv.weight.T @ self.W_o.weight.T).view(n_kvl, nh, hs).transpose(0,1).unsqueeze(0)    
+
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False) -> tuple[torch.Tensor, torch.Tensor]:
+
+        B, T, C = x.size()
+        nh, n_kvl, hs = self.config.n_head, self.config.kv_latent_dim, self.config.n_embd//self.config.n_head
+
+        # k_eff and v_eff based on training or inference
+        if self.training or VAL_RUN: # HIDDEN IN THE DEPTHS : THIS BUG TOOK ~16 HRS TO DEBUG
+            k_eff = (self.W_dq.weight.T @ self.W_uq.weight.T  @ self.W_uk.weight).view(nh, hs, n_kvl).unsqueeze(0)
+            v_eff = (self.W_uv.weight.T @ self.W_o.weight.T).view(n_kvl, nh, hs).transpose(0,1).unsqueeze(0)
+        else:
+            if (self._k_absorbed_inference is None) or (self._v_absorbed_inference is None):
+                self._precompute_absorbed_matrices()
+            k_eff = self._k_absorbed_inference
+            v_eff = self._v_absorbed_inference
+        
+        new_c_kv = self.W_dkv(x) # down projection : (B,T,C) -> (B,T,n_kvl)
+
+        if kv_cache is None:
+            c_kv = new_c_kv # (B,T,n_kvl) ; initiate cache
+        else:
+            c_kv = torch.cat([kv_cache, new_c_kv], dim=1) # append cache
+        
+        updated_kv_cache = c_kv
+
+        T_full = c_kv.size(1) # Current total sequence length (including cache)
+
+        q:torch.Tensor = self.W_uq(self.W_dq(x)) # query projection : (B,T,C) -> (B,T,n_ql) -> (B,T,C)
+        q = q.view(B, T, nh, hs).transpose(1, 2) # (B,T,C) -> (B,T,nh,hs) -> (B, nh, T, hs)
+
+        attn:torch.Tensor = (q @ k_eff @ c_kv.transpose(1,2).unsqueeze(1)) / math.sqrt(hs)
+
+        # query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
+        # key_indices   = torch.arange(T_full, device=x.device).unsqueeze(0)
+        # mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
+        # attn = attn.masked_fill(mask == 0, float('-inf'))
+        
+        mask = torch.triu(torch.ones(T, T_full, device=x.device, dtype=torch.bool), diagonal=T_full - T + 1)
+        attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+        
+        attn = self.dropout(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
+
+        # final output : attn @ C_kv @ v_abs 
+        # (B, nh, T, T) * (B, 1, T, n_kvl) * (1, nh, n_kvl, hs) = (B, nh, T, hs)
+        y:torch.Tensor = attn @ c_kv.unsqueeze(1) @ v_eff #(B, nh, T, hs)
+        y = self.dropout(y.transpose(1,2).contiguous().view(B,T,C))
+
+        return y, updated_kv_cache
+
+class FullMHLA(nn.Module):
+    """
+    A fully parallel implementation of Multi-Head Latent Attention (MLA)
+    with Decoupled Rotary Position Embeddings (RoPE), as described in DeepSeek-V2.
+    """
+     
+    def __init__(self, config:LLMconfig):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0, "num of heads must be a divisor of n_embd"
+        self.config = config
+        self.W_dq  = nn.Linear(config.n_embd, config.q_latent_dim , False)
+        self.dropout = nn.Dropout(config.dropout)
+        
+        # (NoPE)
+        self.head_size = config.n_embd // config.n_head
+        self.W_uq  = nn.Linear(config.q_latent_dim , config.n_embd, False)
+        self.W_dkv = nn.Linear(config.n_embd, config.kv_latent_dim, False)
+        self.W_uk  = nn.Linear(config.kv_latent_dim, config.n_embd, False)
+        self.W_uv  = nn.Linear(config.kv_latent_dim, config.n_embd, False)
+
+        # (RoPE)
+        self.W_qr  = nn.Linear(config.q_latent_dim, config.n_head * config.rope_head_dim,  False)
+        self.W_kr  = nn.Linear(config.n_embd, config.rope_head_dim, False)
+
+        # (Out)
+        self.W_o = nn.Linear(config.n_embd, config.n_embd ,False)
+
+        # Absroption during inference
+        self.register_buffer('_k_absorbed_inference', None, persistent=True)
+        self.register_buffer('_v_absorbed_inference', None, persistent=True)
+
+    def _precompute_absorbed_matrices(self):
+        """Precomputes k_absorbed and v_absorbed for efficient inference."""
+        # Just to be safe
+        if (self._k_absorbed_inference is not None) and (self._v_absorbed_inference is not None):
+            return 
+        
+        nh, nlkv, hs, nlq = self.config.n_head, self.config.kv_latent_dim, self.config.n_embd//self.config.n_head, self.config.q_latent_dim
+        with torch.no_grad():
+            self._k_absorbed_inference = (self.W_uq.weight.view(1,nlq,nh,hs).transpose(1,2) @ self.W_uk.weight.view(1,nh,hs,nlkv))
+            self._v_absorbed_inference = (self.W_uv.weight.T @ self.W_o.weight.T).view(nlkv, nh, hs).transpose(0,1).unsqueeze(0)    
+
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
+        B,T,C = x.size()
+        nh,nlkv,nlq = self.config.n_head, self.config.kv_latent_dim, self.config.q_latent_dim
+        hs = C//nh
+        dhr = self.config.rope_head_dim
+        
+        c_q:torch.Tensor = self.W_dq(x)  # (B,T,nlq)
+
+ #------------ NoPE--------------
+
+        # Define the absorbed matrices
+        if self.training or VAL_RUN:  # HIDDEN IN PLAIN SIGHT : THIS BUG TOOK ~16 HRS TO DEBUG
+            k_eff = (self.W_uq.weight.view(1,nlq,nh,hs).transpose(1,2) @ self.W_uk.weight.view(1,nh,hs,nlkv))
+            v_eff = (self.W_uv.weight.T @ self.W_o.weight.T).view(nlkv, nh, hs).transpose(0,1).unsqueeze(0)  
+        else:
+            if (self._k_absorbed_inference is None) or (self._v_absorbed_inference is None):
+                self._precompute_absorbed_matrices()
+            k_eff = self._k_absorbed_inference
+            v_eff = self._v_absorbed_inference
+
+        new_c_kv = self.W_dkv(x) # down projection : (B,T,C) -> (B,T,n_kvl)
+
+        if kv_cache is None: # first pass
+            c_kv = new_c_kv # (B,T,n_kvl) ; initiate cache
+        else:
+            c_kv = torch.cat([kv_cache['c_kv'], new_c_kv], dim=1) # append cache
+
+        T_full = c_kv.size(1) # Current total sequence length (including cache)
+
+        attn_c = c_q.unsqueeze(1) @ k_eff @ c_kv.transpose(-1,-2).unsqueeze(1)
+
+ #------------ RoPE--------------
+
+        c_kr:torch.Tensor = self.W_kr(x).unsqueeze(2)        # (B,T,1,dhr)
+        k_r = apply_rotary_emb(c_kr, freqs_cis).transpose(1,2)  # (B,1,T,dhr), to be cached
+
+        # initate KV cache
+        if kv_cache is not None:
+            k_r = torch.cat([kv_cache['k_r'], k_r], dim=2)
+
+        c_qr:torch.Tensor = self.W_qr(c_q).view(B,T,nh,dhr) # (B,T,nh,dhr) # because rope expects (B,T,H,dh)
+        q_r = apply_rotary_emb(c_qr, freqs_cis).transpose(1,2) # (B,nh,T,dhr)
+        
+        attn_r = q_r @ k_r.transpose(-1,-2)
+
+ #------------ Out--------------
+
+        attn = (attn_c + attn_r)/math.sqrt(hs+dhr)
+
+        # query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
+        # key_indices = torch.arange(T_full, device=x.device).unsqueeze(0)
+        # mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
+        # attn = attn.masked_fill(mask == 0, float('-inf')) 
+
+        mask = torch.triu(torch.ones(T, T_full, device=x.device, dtype=torch.bool), diagonal=T_full - T + 1)
+        attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+
+        attn:torch.Tensor = self.dropout(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
+
+        # final output : attn @ C_kv @ v_abs 
+        # (B, nh, T, T) * (B, 1, T, n_kvl) * (1, nh, n_kvl, hs) = (B, nh, T, hs)
+        y:torch.Tensor = attn @ c_kv.unsqueeze(1) @ v_eff #(B, nh, T, hs)
+        y = self.dropout(y.transpose(1,2).contiguous().view(B,T,C))
+
+        updated_kv_cache = {'c_kv': c_kv, 'k_r': k_r}
+
+        return y, updated_kv_cache
+
+class Attention(nn.Module):
+    """ Routes the attention mechanism according to the config"""
+
+    def __init__(self, config:LLMconfig):
+        super().__init__()
+        self.config = config
+        if config.attn in ('mha','mqa','gqa'):
+            self.attn = GQA(config)
+        
+        elif config.attn == 'mla':
+            if config.pos_emb != 'rope':
+                self.attn = NaiveMHLA(config)
+            else:
+                self.attn = FullMHLA(config)
+                
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
+        return self.attn(x, freqs_cis, kv_cache, VAL_RUN)
+
+class MLP(nn.Module):
+    """ A simple feed-forward network block. """
+    def __init__(self, config: LLMconfig):
+        super().__init__()
+        self.non_linearity = config.non_linearity.lower()
+        
+        if self.non_linearity == 'swiglu':
+            # One projection, then split into two halves
+            self.c_fc = nn.Linear(config.n_embd, 2 * config.up_dim, bias=False)
+            self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+        else:
+            non_linearity_map = {
+                'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
+                'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
+                'glu' : nn.GLU(), 'sigmoid': nn.Sigmoid(),
+                'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh()
+            }
+            self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
+            self.non_linearity_func = non_linearity_map.get(self.non_linearity, nn.GELU())
+            self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        if self.non_linearity == 'swiglu':
+            x1, x2 = self.c_fc(x).chunk(2, dim=-1)
+            x = F.silu(x1) * x2
+        else:
+            x = self.c_fc(x)
+            x = self.non_linearity_func(x)
+        
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
+
+class Expert(nn.Module):
+    """ A single feed-forward network expert. """
+    def __init__(self, config:LLMconfig):
+        super().__init__()
+        self.expert = MLP(config)
+        
+    def forward(self, x):
+        return self.expert(x)
+
+class MoE(nn.Module):
+    '''
+    This class implements the DeepSeekMoE layer, featuring shared and routed experts.
+    It uses an Auxiliary-Loss-Free load balancing strategy with a dynamic bias term.
+    Ref: https://arxiv.org/pdf/2412.19437
+    '''
+
+    def __init__(self, config: LLMconfig):
+        super().__init__()
+        self.config = config
+        
+        # first `n_shared` are shared, the rest are routed
+        self.n_shared = config.n_shared
+        self.n_routed = config.n_exp - config.n_shared
+        
+        # Number of experts to activate from the ROUTED pool
+        self.n_act_routed = config.n_act - config.n_shared
+        assert self.n_act_routed > 0, "Number of active experts must be greater than shared experts"
+
+        self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_exp)])
+        self.gate = nn.Linear(config.n_embd, self.n_routed, bias=False)
+        
+        if config.aux_free:
+            self.register_buffer('expert_bias', torch.zeros(self.n_routed))
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """ Forward pass for the DeepSeekMoE layer with Aux-Loss-Free Balancing. """
+        B, T, C = x.shape
+        x_flat = x.view(-1, C)  # Shape: (B*T, C)
+        n_tokens = x_flat.shape[0]
+
+        # ___________ SHARED EXPERT PATH ___________
+
+        shared_output = torch.zeros_like(x_flat)
+        if self.n_shared > 0:
+            for i in range(self.n_shared):
+                shared_output += self.experts[i](x_flat) # bypass the router
+
+        #  ___________ ROUTED EXPERT PATH ___________
+
+        router_logits = self.gate(x_flat)
+
+        if self.config.aux_free:        
+            # Add Bias and then select topk
+            biased_router_logits = router_logits + self.expert_bias
+            topk_biased_logits, topk_indices = torch.topk(biased_router_logits, self.n_act_routed, dim=1)
+
+            # Gating weights are based on un-biased logits
+            topk_original_logits = torch.gather(router_logits, 1, topk_indices) 
+            topk_gates = F.softmax(topk_original_logits, dim=1)
+
+            # Calculate expert load and update bias during training only
+            with torch.no_grad():
+                ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
+                fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
+                fi = fi_counts / n_tokens
+
+            if self.training:
+                with torch.no_grad():
+                    ideal_load = 1.0 / self.n_routed
+                    delta = ideal_load - fi 
+                    self.expert_bias += (self.config.gamma*delta)
+
+            router_probs = F.softmax(router_logits, dim=1)
+            pi = router_probs.mean(dim=0)
+            aux_loss = self.config.alpha * self.n_routed * torch.sum(pi*fi)
+
+        else:
+            router_probs = F.softmax(router_logits, dim=1)
+            pi = router_probs.mean(dim=0)
+            
+            topk_logits, topk_indices = torch.topk(router_logits, self.n_act_routed, dim=1)
+            ones = torch.ones_like(topk_indices, dtype=torch.float)
+            fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
+            fi = fi_counts / n_tokens
+
+            aux_loss = self.config.coeff * self.n_routed * torch.sum(pi * fi)
+
+            topk_gates = F.softmax(topk_logits, dim=1)  
+
+        # Dispatch
+        routed_output = torch.zeros_like(x_flat)
+
+        for i in range(self.n_routed):
+            token_indices, topk_slot = (topk_indices == i).nonzero(as_tuple=True)
+            if token_indices.numel() > 0:
+                tokens_for_expert = x_flat[token_indices]
+                gates_for_expert = topk_gates[token_indices, topk_slot].unsqueeze(1)
+
+                # access the expert using an offset of `n_shared`
+                expert_output = self.experts[i + self.n_shared](tokens_for_expert)
+                
+                weighted_output = expert_output * gates_for_expert
+                routed_output.index_add_(0, token_indices, weighted_output)
+        
+        # combine to output
+        y = (shared_output + routed_output).view(B, T, C)
+        return y, aux_loss
+
+class Block(nn.Module):
+    """ A single Transformer block combining attention and MLP. """
+    def __init__(self, config:LLMconfig):
+        super().__init__()
+        self.is_moe = config.moe
+        self.attn = Attention(config)
+        self.ln1  = LayerNorm(config, config.n_embd)
+        self.ln2  = LayerNorm(config, config.n_embd)
+        if config.moe:
+            self.moe = MoE(config)
+        else:
+            self.mlp = MLP(config)
+
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
+        # Layer Norm + Attention
+        attn_output, updated_kv_cache = self.attn.forward(self.ln1(x), freqs_cis, kv_cache, VAL_RUN)
+        x = x + attn_output
+
+        if self.is_moe: 
+            moe_output, aux_loss = self.moe(self.ln2(x))
+            x = x + moe_output
+        else:
+            aux_loss = 0.0
+            x = x + self.mlp(self.ln2(x))
+
+        return x, updated_kv_cache, aux_loss
+
+class _transformer_container(nn.Module):
+    '''For type checking in LLM class'''
+    drop:nn.Dropout
+    h:list[Block]
+    ln_f:LayerNorm
+
+class LLM(nn.Module):
+    """ A simple Large language model """
+    def __init__(self, config:LLMconfig):
+        super().__init__()
+        self.config = config
+        self.tkn_emb = nn.Embedding(config.vocab_size, config.n_embd)
+        if config.pos_emb == 'learn':
+            self.pos_emb = nn.Embedding(config.block_size, config.n_embd)
+        elif config.pos_emb == 'sin':
+            pos_emb  = torch.zeros(config.block_size, config.n_embd)
+            position = torch.arange(0, config.block_size, dtype=torch.float).unsqueeze(1)
+            div_term = torch.exp(torch.arange(0, config.n_embd, 2).float() * (-math.log(10000.0) / config.n_embd))
+            pos_emb[:, 0::2] = torch.sin(position * div_term)
+            pos_emb[:, 1::2] = torch.cos(position * div_term)
+            self.register_buffer('pos_emb', pos_emb)
+        elif config.pos_emb == 'rope':
+            fcl = self._precompute_freqs_cis_layers() 
+            for i,fci in enumerate(fcl): self.register_buffer(f"freqs_cis_{i}", fci)
+            del fcl
+            # self.register_buffer("freqs_cis_layers", self._precompute_freqs_cis_layers(), persistent=False)
+    
+        self.transformer:_transformer_container = nn.ModuleDict(dict(
+            drop = nn.Dropout(config.dropout),
+            h    = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f = LayerNorm(config, config.n_embd)))
+        
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.tkn_emb.weight = self.lm_head.weight # weight tying
+        self.apply(self._init_weights)
+
+        self.VAL_RUN=False
+        if config.act_recomp: print("Using Activation Recomputation")
+
+    def _precompute_freqs_cis_layers(self):
+        """Precomputes the rotary frequencies for each layer for RoPE."""
+        freqs_cis_layers = []
+        for layer_config in self.config.layer_configs:
+            d = layer_config.rope_head_dim if layer_config.attn=='mla' else layer_config.n_embd//layer_config.n_head
+            assert d % 2 == 0, "head dimension must be even"
+            theta = 1.0 / (10000.0 ** (torch.arange(0, d, 2).float() / d)) # 1.0 / (base^(2i/d))
+            seq = torch.arange(self.config.block_size)
+            freqs = torch.outer(seq, theta)
+            # Convert to complex numbers: r * e^(i*theta)
+            freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+
+            if layer_config.pos_emb=='rope': freqs_cis_layers.append(freqs_cis) # Should always happen 
+            else: freqs_cis_layers.append(None) # Should never happen
+
+        # return torch.stack(freqs_cis_layers, dim=0) # register_buffer only accepts a torch.tensor
+        return freqs_cis_layers
+        
+    def _init_weights(self, module):
+        """Initializes model weights."""
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def get_num_params(self):
+        """Returns the total number of parameters and active parameters in the model."""
+        n_params = sum(p.numel() for p in self.parameters())
+        
+        active_params = 0
+
+        active_params += self.tkn_emb.weight.numel()      # embeddings
+        if self.config.pos_emb == 'learn': active_params += self.pos_emb.weight.numel()
+        if self.config.norm == 'layer': active_params += self.transformer.ln_f.bias.numel()
+        active_params += self.transformer.ln_f.weight.numel() 
+
+        for block in self.transformer.h:
+            active_params += sum(p.numel() for p in block.attn.parameters())   # ----|
+            active_params += sum(p.numel() for p in block.ln1.parameters())    #     |---> Always active
+            active_params += sum(p.numel() for p in block.ln2.parameters())    # ----|
+
+            if block.is_moe:
+
+                active_params += sum(p.numel() for p in block.moe.gate.parameters())                # ----|
+                for i in range(block.moe.n_shared):                                                 #     |---> Always active
+                    active_params += sum(p.numel() for p in block.moe.experts[i].parameters())      # ----|
+
+                if block.moe.n_routed > 0:
+                    # Calculate params for one routed expert, multiply by the number of active ones
+                    params_per_routed_expert = sum(p.numel() for p in block.moe.experts[block.moe.n_shared].parameters())
+                    active_params += block.moe.n_act_routed * params_per_routed_expert
+            
+            else: # In case a block is not MoE
+                active_params += sum(p.numel() for p in block.mlp.parameters())
+
+        return n_params, active_params
+
+    def configure_optimizers(self, weight_decay, learning_rate, device):
+        # start with all of the candidate parameters (that require grad)
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+        decay_params = [p for p in param_dict.values() if p.dim() >= 2]
+        nodecay_params = [p for p in param_dict.values() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0}]
+
+        # Create AdamW optimizer and use the fused version if it is available
+        try:
+            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=True)
+            print("Using Fused AdamW")
+        except:
+            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate)
+        return optimizer
+
+    def prepare_inputs_for_generation(self, input_ids, **kwargs):
+        """
+        Prepares inputs for generation. This is a standard method expected by
+        Hugging Face's generation utilities.
+        """
+        # The model_inputs dictionary will be passed to the forward method.
+        # It needs to contain all the arguments that the forward method accepts.
+        model_inputs = {"idx": input_ids}
+
+        # The `kwargs` dictionary might contain other useful parameters like `past_key_values`.
+        # In your case, you are using `kv_caches`.
+        model_inputs.update(kwargs)
+        return model_inputs
+
+    def forward(self, idx: torch.Tensor, targets:torch.Tensor|None=None, kv_caches:list[torch.Tensor]|None=None):
+        B, T = idx.size()
+        start_pos = 0
+
+        if kv_caches is not None and kv_caches[0] is not None:
+            first_layer_config = self.config.layer_configs[0]
+            if first_layer_config.attn in ('mha', 'mqa', 'gqa'):
+                start_pos = kv_caches[0][0].shape[-2]
+            elif first_layer_config.attn == 'mla':
+                if first_layer_config.pos_emb == 'rope':
+                    start_pos = kv_caches[0]['c_kv'].shape[1]
+                else: # Naive MLA (tensor cache)
+                    start_pos = kv_caches[0].shape[1]
+
+        tkn_emb = self.tkn_emb(idx)  # Shape: (B, T, n_embd)
+        
+        x = tkn_emb # Default value for x
+        freqs_cis_layers = [None for _ in range(self.config.n_layer)]
+        if self.config.pos_emb == 'rope':
+            freqs_cis_layers = [getattr(self, f"freqs_cis_{i}")[start_pos : start_pos + T] for i in range(self.config.n_layer)]
+
+        elif self.config.pos_emb == 'learn':
+            pos = torch.arange(start_pos, start_pos + T, dtype=torch.long, device=idx.device)
+            x = tkn_emb + self.pos_emb(pos)
+
+        elif self.config.pos_emb == 'sin':
+            pos = torch.arange(start_pos, start_pos + T, dtype=torch.long, device=idx.device)
+            x = tkn_emb + self.pos_emb[pos]
+
+        x = self.transformer.drop(x)
+
+        if kv_caches is None:
+            kv_caches = [None] * self.config.n_layer
+        
+        updated_kv_caches = []
+        total_aux_loss = 0.0
+        for i, block in enumerate(self.transformer.h):
+            # The block now returns an auxiliary loss from the MoE layer
+            if not self.config.act_recomp: 
+                x, updated_kv_cache, aux_loss = block(x, freqs_cis_layers[i], kv_caches[i], self.VAL_RUN)
+            else : 
+                x, updated_kv_cache, aux_loss = checkpoint(block, x, freqs_cis_layers[i], kv_caches[i], self.VAL_RUN)
+
+            updated_kv_caches.append(updated_kv_cache)
+            total_aux_loss += aux_loss
+
+        x = self.transformer.ln_f(x)
+
+        if targets is not None:
+            logits:torch.Tensor = self.lm_head(x)
+            main_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            # Add the accumulated auxiliary loss to the main loss
+            # We divide by the number of layers because loss is accumulated from each MoE block
+            loss = main_loss + total_aux_loss / self.config.n_layer
+        else:
+            logits = self.lm_head(x[:, [-1], :])
+            loss = None
+
+        return logits, loss, updated_kv_caches
+    
+    @torch.no_grad()
+    def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, topk: int | None = None, EOT:int=None):
+        self.eval()
+        kv_caches = [None] * self.config.n_layer
+
+        for _ in range(max_new_tokens):
+            # crop context to block size, rolling context window
+            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            # for first token, use full prompt, and only last token for subsequent tokens
+            input_for_forward = idx_cond if kv_caches[0] is None else idx[:, -1:]
+
+            # handle the rolling KV cache
+            if kv_caches[0] is not None:
+                # determine current cache length from any layer, say first
+                first_layer_config = self.config.layer_configs[0]
+                if first_layer_config.attn in ('mha', 'mqa', 'gqa'):
+                    cache_len = kv_caches[0][0].shape[-2]
+                elif first_layer_config.attn == 'mla':
+                     cache_len = kv_caches[0]['c_kv'].shape[1] if self.config.pos_emb == 'rope' else kv_caches[0].shape[1]
+                else: cache_len = 0 # should never happen
+
+                # actual handling part
+                if cache_len >= self.config.block_size:
+                    # Keep the most recent (block_size - 1) tokens to make space for the new one
+                    keep_len = self.config.block_size - 1
+                    for layer_idx, layer_config in enumerate(self.config.layer_configs):
+                        layer_cache = kv_caches[layer_idx]
+                        if layer_config.attn in ('mha', 'mqa', 'gqa'):
+                            k, v = layer_cache
+                            kv_caches[layer_idx] = (k[..., -keep_len:, :], v[..., -keep_len:, :])
+                        elif layer_config.attn == 'mla':
+                            if self.config.pos_emb == 'rope':
+                                layer_cache['c_kv'] = layer_cache['c_kv'][:, -keep_len:, :]
+                                layer_cache['k_r']  = layer_cache['k_r'][:, :, -keep_len:, :] # Seq len is dim 2
+                            else: # c_kv
+                                kv_caches[layer_idx] = layer_cache[:, -keep_len:, :]
+
+            # The forward pass now returns three items; we only need logits and caches for generation
+            logits, _, kv_caches = self(input_for_forward, kv_caches=kv_caches)
+            logits = logits[:, -1, :] # logits for final token
+
+            if temperature == 0.0:
+                # greedy sampling, deterministic, "hardmax" instead of softmax
+                idx_next = torch.argmax(logits, dim=-1, keepdim=True) 
+            else:
+                logits = logits / temperature # this is actuallt the randomness or 'creativty' part
+                if topk is not None:
+                    v, _ = torch.topk(logits, min(topk, logits.size(-1))) # pick topk values
+                    logits[logits < v[:, [-1]]] = -float('inf') # mask out other logits
+                probs = F.softmax(logits, dim=-1) # generate a probability distribution
+                idx_next = torch.multinomial(probs, num_samples=1) # sample from probabilty distribution
+            
+            if EOT is not None and (idx_next.item() == EOT): break
+            idx = torch.cat((idx, idx_next), dim=1)
+
+        self.train()
+        return idx
+
+# utils
+def apply_rotary_emb(x:torch.Tensor, freqs_cis:torch.Tensor)->torch.Tensor:
+    ''' Applies RoPE to either the query or the key whose embeddings are to be rotated two at a time.'''
+
+    # H below is either the number of total query heads(nh)
+    # hs is the embedding dimension for the query/key, given by n_embd//nh
+    B,T,H,_ = x.size()
+    x_ = x.float().reshape(B, T, H, -1, 2)          # (B, T, H, hs)       -> (B, T, H, hs//2, 2)    -> creates the two pairs in the embd dim
+    x_re, x_im = x_.unbind(-1)                      # (B, T, H, hs//2, 2) -> (B, T, H, hs//2)       -> splits those two pairs
+    freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(2) # (T, hs//2)          -> (1, T, 1, hs//2)       -> this has dtype complex64, so last dim has two parts, real and imaginary
+    # freqs_cis has two parts : real and imaginary (cosθ, sinθ)
+    # import code ; code.interact(local=locals())
+    # Perform the rotation (vector * rotation matrix)
+    x_re_out = x_re*freqs_cis.real - x_im*freqs_cis.imag    # (B, T, H, hs//2) * (1, T, 1, hs//2) - (B, T, H, hs//2) * (1, T, 1, hs//2) -> (B, T, H, hs//2)
+    x_im_out = x_re*freqs_cis.imag + x_im*freqs_cis.real    # (B, T, H, hs//2) * (1, T, 1, hs//2) + (B, T, H, hs//2) * (1, T, 1, hs//2) -> (B, T, H, hs//2)
+    
+    # Stack the real and imaginary parts back together
+    x_out = torch.stack([x_re_out, x_im_out], dim=-1).flatten(3) # (B, T, H, hs//2), (B, T, H, hs//2) -> (B, T, H, hs)
+
+    return x_out.type_as(x)
+
+def get_lr(iter, TrainingConfig:Trainconfig):
+    max_lr = TrainingConfig.learning_rate
+    min_lr = max_lr*0.1
+    max_decay_steps = TrainingConfig.max_iters + 2 # avoid division by zero
+    # 1) linear warump for warmup_steps:
+    if iter < TrainingConfig.warmup_steps:
+        return max_lr * (iter+1)/TrainingConfig.warmup_steps
+    #2) if iter > lr_decay_iters, return min_lr
+    elif iter > max_decay_steps:
+        return min_lr
+    #3) in between, use cosine decay
+    else:
+        decay_ratio = (iter - TrainingConfig.warmup_steps) / (max_decay_steps - TrainingConfig.warmup_steps)
+        decay_ratio = min(decay_ratio, 1.0)  # ensure it does
+        coeff = 0.5 * (1 + math.cos(math.pi * decay_ratio))
+        return min_lr + coeff * (max_lr - min_lr)
+
+@torch.no_grad()
+def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader, val_loader:DataLoader):
+    out = {}
+    model.eval() ; model.VAL_RUN = True
+    for split, loader in [('train', train_loader), ('val', val_loader)]:
+        losses = torch.zeros(TrainingConfig.eval_iters)
+        for k in range(TrainingConfig.eval_iters):
+            X, Y = loader.next_batch()
+            with ctx:
+                _, loss, _ = model(X, Y)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train(); model.VAL_RUN = False
+    return out
+
+def estimate_mfu(model_config:LLMconfig, train_config:Trainconfig, n_params:int, dt:float, flops_promised:int):
+    """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
+    # first estimate the number of flops we do per iteration.
+    # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
+    L, H, Q, T = model_config.n_layer, model_config.n_head, model_config.n_embd//model_config.n_head, model_config.block_size
+    flops_per_token = 6*n_params + 12*L*H*Q*T
+    # flops_per_fwdbwd = flops_per_token * T
+    flops_per_iter = flops_per_token * train_config.total_batch_size
+
+    flops_achieved = flops_per_iter/dt # per second
+    # flops_promised = 65e12 # T4 GPU bfloat16 peak flops is 65 TFLOPS
+
+    mfu = flops_achieved / flops_promised
+    return mfu
+
+
+# Build model
+with open('mfu_config_1.yaml','r') as f: model_kwargs = yaml.safe_load(f)
+model_config = LLMconfig(**model_kwargs)
+model = LLM(model_config).to('cuda')
+# model = torch.compile(model)
+_, act_params = model.get_num_params()
+print(f"total params : {act_params:,}")
+
+# Build Trainer
+with open('simple_train_config.yaml','r') as f: train_kwargs = yaml.safe_load(f)
+train_config = Trainconfig(**train_kwargs)
+optimzer = model.configure_optimizers(weight_decay=0.1, learning_rate=train_config.learning_rate, device='cuda')
+ctx = torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16) #if device == 'cuda' else nullcontext()
+
+# Load data: tinystories
+train_loader = DataLoader(B=train_config.batch_size, 
+                          T=model_config.block_size, 
+                          file_path=f'../data/{train_config.dataset}/train.bin',
+                          device='cuda')
+
+
+# Training loop
+
+x,y = train_loader.next_batch()
+running_mfu = -1
+running_throughput = -1
+
+for iter in range(500):
+    # fwd pass -> loss -> bwd pass -> step 
+    lr = get_lr(iter, train_config)   # get LR
+    
+    t0 = perf_counter()               # start stopwatch
+    # actual training
+    with ctx: _, loss, _ = model(x,y) # fwd, loss
+    x,y = train_loader.next_batch()   # async pre-fetch
+    optimzer.zero_grad()              # clear old grads
+    loss.backward()                   # bwd
+    optimzer.step()                   # update weights
+    
+    # stats calculation
+    dt = (perf_counter()-t0)*1000     # s to ms
+    throughput = 1000*train_config.total_batch_size/dt # total_tokens_per_step / time taken per step
+    mfu = estimate_mfu(model_config, train_config, act_params, dt, 1e12)
+    
+    # moving average
+    running_mfu       = mfu        if running_mfu<0        else 0.9*running_mfu        + 0.1*mfu
+    running_thoughput = throughput if running_throughput<0 else 0.9*running_throughput + 0.1*throughput
+
+    if iter>20:
+        print(f"step: {iter} | train loss:{loss.item():.4f} | dt: {dt:.2f}ms | throughput: {int(running_thoughput):,} tkn/s | MFU: {running_mfu*100:.2f}%")
